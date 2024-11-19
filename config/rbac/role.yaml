@@ -1,0 +1,59 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.tochka.com
+  resources:
+  - shardedhttpproxies
+  - shardedingresses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.tochka.com
+  resources:
+  - shardedhttpproxies/finalizers
+  - shardedingresses/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - networking.k8s.tochka.com
+  resources:
+  - shardedhttpproxies/status
+  - shardedingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - projectcontour.io
+  resources:
+  - httpproxies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

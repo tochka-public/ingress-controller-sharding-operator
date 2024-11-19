@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.tochka.com/v1
+kind: ShardedIngress
+metadata:
+  name: test-app1
+  namespace: dummy
+  labels:
+    app: test-app
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    # k8s.tochka.com/use-all-class-shards: "true"
+    meta.helm.sh/release-name: test-cert
+    meta.helm.sh/release-namespace: dummy
+spec:
+  template:
+    metadata:
+      labels:
+        app: test-app
+      annotations:
+        k8s.tochka.com/mutate-hosts: basic
+        k8s.tochka.com/network-segment: general
+        k8s.tochka.com/quaestor-port: "443"
+        nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    spec:
+      # ingressClassName: default
+      ingressClassName: vpn
+      rules:
+      - host: test-app.dummy.svc.cluster.local
+        http:
+          paths:
+          - backend:
+              service:
+                name: test-app
+                port:
+                  number: 80
+            path: /
+            pathType: Prefix
+      tls:
+      - hosts:
+        - test-app.dummy.svc.cluster.local
+        secretName: test-app.dummy.ing

@@ -1,0 +1,83 @@
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-0
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-1
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-2
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-3
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-4
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: vpn-5
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-0
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-1
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-2
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-3
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-4
+spec:
+  controller: example.com/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: default-5
+spec:
+  controller: example.com/ingress-controller

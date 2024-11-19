@@ -1,0 +1,25 @@
+shardedIngress:
+  vpn: 
+    shards: 6
+  default:
+    shards: 6
+  test: 
+    shards: 0
+  mesh: 
+    shards: 0
+shardedHTTPProxy:
+  vpn: 
+    shards: 0
+  default: 
+    shards: 0
+  test: 
+    shards: 0
+  mesh: 
+    shards: 0
+terminationPeriod: 30s
+shardUpdateCooldown: 1s
+rateLimit: 10
+burstLimit: 100
+specialShardsConsulAddHosts:
+  - service.stage.consul
+  - query.consul

@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.tochka.com/v1
+kind: ShardedHTTPProxy
+metadata:
+  name: test-app2
+  namespace: dummy
+  annotations:
+    k8s.tochka.com/mutate-hosts: basic
+    k8s.tochka.com/virtualhosts: test-app2.dummy.svc.cluster.local,dummy-test-app2.service.consul,dummy-test-app2.service.consul-pre,dummy-test-app2.query.consul,dummy-test-app2.query.consul-pre
+spec:
+  template:
+    metadata:
+      labels:
+        app: test-app2
+        canary: "false"
+      annotations:
+        k8s.tochka.com/network-segment: general
+        k8s.tochka.com/quaestor-port: "443"
+    spec:
+      ingressClassName: vpn
+      virtualhost:
+        fqdn: test-app2.dummy.svc.cluster.local
+        tls: 
+          secretName: test-app2.dummy.ing
+      routes:
+      - services:
+        - name: test-app2
+          port: 80
+

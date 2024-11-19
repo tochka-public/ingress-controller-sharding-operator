@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- networking_v1_shardedingress.yaml
+- networking_v1_shardedhttpproxy.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
