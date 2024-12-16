@@ -29,25 +29,35 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	logger := log.FromContext(ctx)
 
 	r.ShardedReconciler = ShardedReconciler{
-		Client:              r.Client,
-		Scheme:              r.Scheme,
-		MaxShards:           r.MaxShards,
-		TerminationPeriod:   r.TerminationPeriod,
-		ShardUpdateCooldown: r.ShardUpdateCooldown,
-		WaitingList:         r.WaitingList,
-		ReadyList:           r.ReadyList,
-		ManagedList:         r.ManagedList,
-		ErrorList:           r.ErrorList,
-		ShardedCache:        r.ShardedCache,
-		ChildCache:          r.ChildCache,
-		NextApplyTime:       r.NextApplyTime,
-		req:                 &req,
-		ctx:                 ctx,
-		ShardedObject:       r.ShardedHTTPProxy,
-		ChildObject:         &r.ChildObject,
-		objKey:              req.NamespacedName.String(),
-		ctrlName:            "shardedhttpproxy",
-		Initialized:         r.Initialized,
+		Client:                                   r.Client,
+		Scheme:                                   r.Scheme,
+		MaxShards:                                r.MaxShards,
+		TerminationPeriod:                        r.TerminationPeriod,
+		ShardUpdateCooldown:                      r.ShardUpdateCooldown,
+		AllShardsBaseHosts:                       r.AllShardsBaseHosts,
+		DomainSubstring:                          r.DomainSubstring,
+		MutatingWebhookAnnotation:                r.MutatingWebhookAnnotation,
+		UnregisterAnnotation:                     r.UnregisterAnnotation,
+		AdditionalServiceDiscoveryClassLabel:     r.AdditionalServiceDiscoveryClassLabel,
+		RootHTTPProxyLabel:                       r.RootHTTPProxyLabel,
+		VirtualHostsHTTPProxyAnnotation:          r.VirtualHostsHTTPProxyAnnotation,
+		AdditionalServiceDiscoveryTagsAnnotation: r.AdditionalServiceDiscoveryTagsAnnotation,
+		AppNameLabel:                             r.AppNameLabel,
+		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
+		WaitingList:                              r.WaitingList,
+		ReadyList:                                r.ReadyList,
+		ManagedList:                              r.ManagedList,
+		ErrorList:                                r.ErrorList,
+		NextApplyTime:                            r.NextApplyTime,
+		ShardedCache:                             r.ShardedCache,
+		ChildCache:                               r.ChildCache,
+		Initialized:                              r.Initialized,
+		req:                                      &req,
+		ctx:                                      ctx,
+		ShardedObject:                            r.ShardedHTTPProxy,
+		ChildObject:                              &r.ChildObject,
+		objKey:                                   req.NamespacedName.String(),
+		ctrlName:                                 "shardedhttpproxy",
 	}
 
 	if !r.Initialized {
@@ -69,7 +79,7 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	if val, ok := r.ShardedHTTPProxy.Annotations["k8s.tochka.com/use-all-class-shards"]; ok && val == "true" {
+	if val, ok := r.ShardedHTTPProxy.Annotations[*r.AllShardsPlacementAnnotation]; ok && val == "true" {
 		r.UseAllShards = true
 	}
 
@@ -115,9 +125,9 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 				// Create a deep copy for the tmp object to modify
 				tempShardedHTTPProxy := shardedHTTPProxy.DeepCopy()
 				tempShardedHTTPProxy.SetName(tempName)
-				tempShardedHTTPProxy.Spec.Template.Labels["k8s.tochka.com/quaestor"] = r.Conflict
+				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = r.Conflict
 				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, r.Conflict, nil)
-				tempHTTPProxy.ObjectMeta.Labels["k8s.tochka.com/quaestor-base-proxy"] = "true"
+				tempHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
 					ShardName: ingressClass,
@@ -125,7 +135,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 				})
 
 				// Handle virtual hosts for the tmp object
-				if serverAlias, exists := tempShardedHTTPProxy.Annotations["k8s.tochka.com/virtualhosts"]; exists && serverAlias != "" {
+				if serverAlias, exists := tempShardedHTTPProxy.Annotations[*r.VirtualHostsHTTPProxyAnnotation]; exists && serverAlias != "" {
 					hosts := strings.Split(serverAlias, ",")
 
 					for i, host := range hosts {
@@ -157,7 +167,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		}
 
 		mainHTTPProxyName := shardedHTTPProxy.Name
-		shardedHTTPProxy.Spec.Template.Labels["k8s.tochka.com/quaestor"] = ingressClass
+		shardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = ingressClass
 		if r.ShardedObject.GetIngressClassName() != shard.ShardName {
 			mainHTTPProxyName = fmt.Sprintf("%s-%d", shardedHTTPProxy.Name, shard.ShardNumber)
 		}
@@ -165,7 +175,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 
 		// Create the base HTTPProxy
 		baseHTTPProxy := r.createHTTPProxy(shardedHTTPProxy, mainHTTPProxyName, ingressClass, nil)
-		baseHTTPProxy.ObjectMeta.Labels["k8s.tochka.com/quaestor-base-proxy"] = "true"
+		baseHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 		httpProxies = append(httpProxies, NewChildObj{
 			Shard:     shard.ShardNumber,
 			ShardName: ingressClass,
@@ -173,7 +183,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		})
 
 		// Handle virtual hosts
-		if serverAlias, exists := shardedHTTPProxy.Annotations["k8s.tochka.com/virtualhosts"]; exists && serverAlias != "" {
+		if serverAlias, exists := shardedHTTPProxy.Annotations[*r.VirtualHostsHTTPProxyAnnotation]; exists && serverAlias != "" {
 			hosts := strings.Split(serverAlias, ",")
 
 			for i, host := range hosts {

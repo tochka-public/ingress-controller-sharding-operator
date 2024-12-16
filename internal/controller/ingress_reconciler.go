@@ -29,26 +29,33 @@ func (r *ShardedIngressReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	logger := log.FromContext(ctx)
 
 	r.ShardedReconciler = ShardedReconciler{
-		Client:                  r.Client,
-		Scheme:                  r.Scheme,
-		MaxShards:               r.MaxShards,
-		TerminationPeriod:       r.TerminationPeriod,
-		ShardUpdateCooldown:     r.ShardUpdateCooldown,
-		AllShardsConsulAddHosts: r.AllShardsConsulAddHosts,
-		WaitingList:             r.WaitingList,
-		ReadyList:               r.ReadyList,
-		ManagedList:             r.ManagedList,
-		ErrorList:               r.ErrorList,
-		ShardedCache:            r.ShardedCache,
-		ChildCache:              r.ChildCache,
-		NextApplyTime:           r.NextApplyTime,
-		req:                     &req,
-		ctx:                     ctx,
-		ShardedObject:           r.ShardedIngress,
-		ChildObject:             &r.ChildObject,
-		objKey:                  req.NamespacedName.String(),
-		ctrlName:                "shardedingress",
-		Initialized:             r.Initialized,
+		Client:                                   r.Client,
+		Scheme:                                   r.Scheme,
+		MaxShards:                                r.MaxShards,
+		TerminationPeriod:                        r.TerminationPeriod,
+		ShardUpdateCooldown:                      r.ShardUpdateCooldown,
+		AllShardsBaseHosts:                       r.AllShardsBaseHosts,
+		DomainSubstring:                          r.DomainSubstring,
+		MutatingWebhookAnnotation:                r.MutatingWebhookAnnotation,
+		UnregisterAnnotation:                     r.UnregisterAnnotation,
+		AdditionalServiceDiscoveryClassLabel:     r.AdditionalServiceDiscoveryClassLabel,
+		AdditionalServiceDiscoveryTagsAnnotation: r.AdditionalServiceDiscoveryTagsAnnotation,
+		AppNameLabel:                             r.AppNameLabel,
+		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
+		WaitingList:                              r.WaitingList,
+		ReadyList:                                r.ReadyList,
+		ManagedList:                              r.ManagedList,
+		ErrorList:                                r.ErrorList,
+		NextApplyTime:                            r.NextApplyTime,
+		ShardedCache:                             r.ShardedCache,
+		ChildCache:                               r.ChildCache,
+		Initialized:                              r.Initialized,
+		req:                                      &req,
+		ctx:                                      ctx,
+		ShardedObject:                            r.ShardedIngress,
+		ChildObject:                              &r.ChildObject,
+		objKey:                                   req.NamespacedName.String(),
+		ctrlName:                                 "shardedingress",
 	}
 
 	if !r.Initialized {
@@ -70,7 +77,7 @@ func (r *ShardedIngressReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	if val := r.ShardedIngress.Annotations["k8s.tochka.com/use-all-class-shards"]; val == "true" {
+	if val := r.ShardedIngress.Annotations[*r.AllShardsPlacementAnnotation]; val == "true" {
 		r.UseAllShards = true
 	}
 
@@ -115,7 +122,7 @@ func (r *ShardedIngressReconciler) NewIngressFromShardedIngress() ([]NewChildObj
 			if errors.IsNotFound(err) && conflict != "" {
 				// Create a deep copy for the tmp object to modify
 				tempShardedIngress := shardedIngress.DeepCopy()
-				tempShardedIngress.Spec.Template.Labels["k8s.tochka.com/quaestor"] = conflict
+				tempShardedIngress.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = conflict
 				tempIngress := r.createIngress(tempShardedIngress, tempName, conflict)
 				ingresses = append(ingresses, NewChildObj{
 					Shard:     shard.ShardNumber,
@@ -134,20 +141,20 @@ func (r *ShardedIngressReconciler) NewIngressFromShardedIngress() ([]NewChildObj
 		}
 
 		mainIngressName := shardedIngress.Name
-		shardedIngress.Spec.Template.Labels["k8s.tochka.com/quaestor"] = ingressClass
+		shardedIngress.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = ingressClass
 
-		if r.UseAllShards && shardedIngress.Spec.Template.Labels["app"] != "" {
-			app := shardedIngress.Spec.Template.Labels["app"]
-			existingTags := shardedIngress.Spec.Template.Annotations["k8s.tochka.com/quaestor-tags"]
+		if r.UseAllShards && shardedIngress.Spec.Template.Labels[*r.AppNameLabel] != "" {
+			app := shardedIngress.Spec.Template.Labels[*r.AppNameLabel]
+			existingTags := shardedIngress.Spec.Template.Annotations[*r.AdditionalServiceDiscoveryTagsAnnotation]
 			if existingTags != "" {
-				shardedIngress.Spec.Template.Annotations["k8s.tochka.com/quaestor-tags"] = existingTags + "," + ingressClass
+				shardedIngress.Spec.Template.Annotations[*r.AdditionalServiceDiscoveryTagsAnnotation] = existingTags + "," + ingressClass
 			} else {
-				shardedIngress.Spec.Template.Annotations["k8s.tochka.com/quaestor-tags"] = ingressClass
+				shardedIngress.Spec.Template.Annotations[*r.AdditionalServiceDiscoveryTagsAnnotation] = ingressClass
 			}
 
 			if len(shardedIngress.Spec.Template.Spec.Rules) > 0 {
 				firstRule := shardedIngress.Spec.Template.Spec.Rules[0]
-				for _, host := range *r.AllShardsConsulAddHosts {
+				for _, host := range *r.AllShardsBaseHosts {
 					newRule := firstRule.DeepCopy()
 					newRule.Host = fmt.Sprintf("%s.%s-%s.%s", ingressClass, shardedIngress.Namespace, app, host)
 					shardedIngress.Spec.Template.Spec.Rules = append(shardedIngress.Spec.Template.Spec.Rules, *newRule)

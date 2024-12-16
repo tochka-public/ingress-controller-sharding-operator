@@ -1,25 +1,58 @@
 shardedIngress:
-  vpn: 
-    shards: 6
-  default:
-    shards: 6
-  test: 
-    shards: 0
-  mesh: 
-    shards: 0
+  # SHARDED_SHARDEDINGRESS_SHARDS='{"default": 6, "test": 0, "mesh": 0, "vpn": 6}'
+  shards:
+    default: 6
+    test: 0
+    mesh: 0
+    vpn: 6
+
 shardedHTTPProxy:
-  vpn: 
-    shards: 0
-  default: 
-    shards: 0
-  test: 
-    shards: 0
-  mesh: 
-    shards: 0
-terminationPeriod: 30s
-shardUpdateCooldown: 1s
-rateLimit: 10
-burstLimit: 100
-specialShardsConsulAddHosts:
-  - service.stage.consul
-  - query.consul
+  shards:
+    default: 0
+    test: 0
+    mesh: 0
+    vpn: 0
+  labels:
+    # SHARDED_SHARDEDHTTPPROXY_LABELS_ROOTHTTPPROXY
+    rootHTTPProxy: "k8s.tochka.com/base-proxy"
+  annotations:
+    # SHARDED_SHARDEDHTTPPROXY_ANNOTATIONS_VIRTUALHOSTS
+    virtualHosts: "k8s.tochka.com/virtual-hosts"
+
+rateLimit:
+  updateCooldown:
+    # SHARDED_RATELIMIT_UPDATECOOLDOWN_OBJECT
+    object: 30s # full termination period is updateCooldown.object * 3
+    shard: 10s # protection ingesses from overload when reloading shards
+  # SHARDED_RATELIMIT_APIRATELIMIT
+  apiRateLimit: 10
+  apiBurstLimit: 100
+
+general:
+  # SHARDED_GENERAL_DOMAINSUBSTRING
+  domainSubstring: "domain"
+  annotations:
+    # SHARDED_GENERAL_ANNOTATIONS_MUTATINGWEBHOOK
+    mutatingWebhook: "k8s.tochka.com/mutate-hosts"
+
+additionalServiceDiscovery:
+  labels:
+    # SHARDED_ADDITIONALSERVICEDISCOVERY_LABELS_CLASS
+    class: "k8s.tochka.com/ingress-class"
+    # SHARDED_ADDITIONALSERVICEDISCOVERY_LABELS_APPNAME
+    appName: "k8s.tochka.com/app-name"
+  annotations:
+    # SHARDED_ADDITIONALSERVICEDISCOVERY_ANNOTATIONS_TAGS
+    tags: "k8s.tochka.com/service-discovery-tags"
+    # SHARDED_ADDITIONALSERVICEDISCOVERY_ANNOTATIONS_UNREGISTERING
+    unregistering: "k8s.tochka.com/marked-for-deletion"
+
+allShardsPlacement:
+  annotations:
+    # SHARDED_ALLSHARDSPLACEMENT_ANNOTATIONS_ENABLED
+    enabled: "k8s.tochka.com/use-all-class-shards"
+  # SHARDED_ALLSHARDSPLACEMENT_SHARDBASEDOMAINS = "example.domain.test,anotherdomain.test"
+  # result: vpn-N.ns-appname.example.domain.test,vpn-N.ns-appname.anotherdomain.test based on first template rule (appname.ns.svc.cluster.local)
+  shardBaseDomains:
+    - example.domain.test
+    - anotherdomain.test
