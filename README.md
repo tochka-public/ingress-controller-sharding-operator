@@ -1,4 +1,7 @@
 # ingress-controller-sharding-operator
+
+[![Docker Pulls](https://img.shields.io/docker/pulls/dotfetcher/ingress-controller-sharding-operator?style=for-the-badge)](https://hub.docker.com/r/dotfetcher/ingress-controller-sharding-operator)
+
 Distributes ingress objects between ingress classes (shards) in Kubernetes
 
 ## Description
