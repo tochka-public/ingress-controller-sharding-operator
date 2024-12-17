@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"k8s.tochka.com/sharded-ingress-controller/internal/config"
 	"k8s.tochka.com/sharded-ingress-controller/internal/k8s"
 	"k8s.tochka.com/sharded-ingress-controller/internal/metrics"
 )
@@ -46,30 +45,39 @@ import (
 
 type ShardedReconciler struct {
 	client.Client
-	Scheme                  *runtime.Scheme
-	MaxShards               map[string]config.Shard
-	TerminationPeriod       *time.Duration
-	ShardUpdateCooldown     *time.Duration
-	AllShardsConsulAddHosts *[]string
-	WaitingList             map[string]bool
-	ReadyList               map[string]bool
-	ManagedList             map[string]bool
-	ErrorList               map[string]bool
-	NextApplyTime           map[string]*applyPlan
-	ShardedCache            *sync.Map
-	ChildCache              *sync.Map
-	Initialized             bool
-	req                     *ctrl.Request
-	ShardedObject           ShardedObject
-	ctx                     context.Context
-	ChildObject             client.Object
-	Shards                  []Shards
-	Conflict                string
-	SoftResharding          bool
-	objKey                  string
-	ctrlName                string
-	Regular                 bool
-	UseAllShards            bool
+	Scheme                                   *runtime.Scheme
+	MaxShards                                map[string]int
+	TerminationPeriod                        *time.Duration
+	ShardUpdateCooldown                      *time.Duration
+	AllShardsBaseHosts                       *[]string
+	DomainSubstring                          *string
+	MutatingWebhookAnnotation                *string
+	UnregisterAnnotation                     *string
+	AdditionalServiceDiscoveryClassLabel     *string
+	RootHTTPProxyLabel                       *string
+	VirtualHostsHTTPProxyAnnotation          *string
+	AdditionalServiceDiscoveryTagsAnnotation *string
+	AppNameLabel                             *string
+	AllShardsPlacementAnnotation             *string
+	WaitingList                              map[string]bool
+	ReadyList                                map[string]bool
+	ManagedList                              map[string]bool
+	ErrorList                                map[string]bool
+	NextApplyTime                            map[string]*applyPlan
+	ShardedCache                             *sync.Map
+	ChildCache                               *sync.Map
+	Initialized                              bool
+	req                                      *ctrl.Request
+	ctx                                      context.Context
+	ShardedObject                            ShardedObject
+	ChildObject                              client.Object
+	Shards                                   []Shards
+	Conflict                                 string
+	SoftResharding                           bool
+	objKey                                   string
+	ctrlName                                 string
+	Regular                                  bool
+	UseAllShards                             bool
 }
 
 type ShardedObject interface {
@@ -281,7 +289,7 @@ func (r *ShardedReconciler) updateStatusWithRetry(updateFunc func() error) error
 func (r *ShardedReconciler) updateObject(orig, new client.Object, shardName string) (ctrl.Result, error) {
 	logger := log.FromContext(r.ctx)
 
-	equal, err := IsObjectEqual(orig.DeepCopyObject().(client.Object), new.DeepCopyObject().(client.Object))
+	equal, err := IsObjectEqual(orig.DeepCopyObject().(client.Object), new.DeepCopyObject().(client.Object), r.DomainSubstring, r.MutatingWebhookAnnotation)
 	if err != nil {
 		logger.Error(err, "unable to compare", "objectKind", k8s.KindOf(new), "objectName", new.GetName())
 		return ctrl.Result{}, err
@@ -332,7 +340,7 @@ func restoreOriginal(orig, new client.Object) (client.Object, error) {
 	return nil, fmt.Errorf("unsupported object type: %s", k8s.KindOf(orig))
 }
 
-func IsObjectEqual(old, new client.Object) (bool, error) {
+func IsObjectEqual(old, new client.Object, domainSubstring, mutatingWebhookAnnotation *string) (bool, error) {
 	switch old := old.(type) {
 	// Slow path: compare the content of the objects.
 	case *contourv1.HTTPProxy:
@@ -342,7 +350,7 @@ func IsObjectEqual(old, new client.Object) (bool, error) {
 			apiequality.Semantic.DeepEqual(old.OwnerReferences, new.(*contourv1.HTTPProxy).OwnerReferences), nil
 
 	case *networkingv1.Ingress:
-		mutateHostsValue, exists := new.(*networkingv1.Ingress).Annotations["k8s.tochka.com/mutate-hosts"]
+		mutateHostsValue, exists := new.(*networkingv1.Ingress).Annotations[*mutatingWebhookAnnotation]
 		if exists && mutateHostsValue != "" && mutateHostsValue != "false" {
 			oldAnnotations := old.Annotations
 			newAnnotations := new.(*networkingv1.Ingress).Annotations
@@ -394,10 +402,10 @@ func IsObjectEqual(old, new client.Object) (bool, error) {
 				}
 			}
 
-			// Check if any host in oldTLS does not exist in newTLS and does not contain "consul", because that mean that additionalHosts removed
+			// Check if any host in oldTLS does not exist in newTLS and does not contain "mainDomainSubstring", because that mean that additionalHosts removed
 			for _, oldTLSHost := range oldTLS {
 				for _, host := range oldTLSHost.Hosts {
-					if !containsAllHosts(newTLS, host) && !strings.Contains(host, "consul") {
+					if !containsAllHosts(newTLS, host) && !strings.Contains(host, *domainSubstring) {
 						allTLSExist = false
 						break
 					}
@@ -424,19 +432,19 @@ func IsObjectEqual(old, new client.Object) (bool, error) {
 	return false, fmt.Errorf("do not know how to compare %T and %T", old, new)
 }
 
-func getShardInfo(name, className string, shardSettings map[string]config.Shard, useAllShards bool) ([]Shards, bool, error) {
+func getShardInfo(name, className string, shardSettings map[string]int, useAllShards bool) ([]Shards, bool, error) {
 	maxShards, ok := shardSettings[className]
 	if !ok {
 		return []Shards{{ShardNumber: 0, ShardName: className}}, true, fmt.Errorf("shard type %s not found in config", className)
 	}
-	if maxShards.Shards == 0 {
+	if maxShards == 0 {
 		return []Shards{{ShardNumber: 0, ShardName: className}}, true, nil
 	}
 
 	var shards []Shards
 
 	if useAllShards {
-		for i := 0; i < maxShards.Shards; i++ {
+		for i := 0; i < maxShards; i++ {
 			shardName := fmt.Sprintf("%s-%d", className, i)
 			shards = append(shards, Shards{ShardNumber: i, ShardName: shardName})
 		}
@@ -444,7 +452,7 @@ func getShardInfo(name, className string, shardSettings map[string]config.Shard,
 	}
 
 	hash := xxhash.Sum64String(name)
-	shardNumber := int(hash % uint64(maxShards.Shards))
+	shardNumber := int(hash % uint64(maxShards))
 	shardName := fmt.Sprintf("%s-%d", className, shardNumber)
 	return []Shards{{ShardNumber: shardNumber, ShardName: shardName}}, false, nil
 }
@@ -623,17 +631,17 @@ func (r *ShardedReconciler) CheckClusterShards() error {
 
 	for className, configShard := range r.MaxShards {
 		if count, exists := shardCounts[className]; exists {
-			if count < configShard.Shards {
-				logger.Info("Reducing shard count to match Cluster value", "IngressClass", className, "ConfiguredShards", configShard.Shards, "CurrentShards", count)
-				r.MaxShards[className] = config.Shard{Shards: count}
+			if count < configShard {
+				logger.Info("Reducing shard count to match Cluster value", "IngressClass", className, "ConfiguredShards", configShard, "CurrentShards", count)
+				r.MaxShards[className] = count
 			}
-			for i := 0; i < configShard.Shards; i++ {
+			for i := 0; i < configShard; i++ {
 				shardName := fmt.Sprintf("%s-%d", className, i)
 				r.initApplyPlan(shardName)
 			}
 		} else {
 			logger.Info("ClassName from r.MaxShards not found in Cluster, setting to 0", "IngressClass", className)
-			r.MaxShards[className] = config.Shard{Shards: 0}
+			r.MaxShards[className] = 0
 			r.initApplyPlan(className)
 		}
 	}
@@ -680,7 +688,7 @@ func (r *ShardedReconciler) handleDeletionTiming(obj *unstructured.Unstructured,
 	if isTempObject {
 		delTime = *r.TerminationPeriod * 3
 	}
-	quaestorMarkedForDeletion, quaestorMarkedForDeletionExists := annotations["k8s.tochka.com/quaestor-marked-for-deletion"]
+	markedForDeletion, markedForDeletionExists := annotations[*r.UnregisterAnnotation]
 
 	if deleteAfterExists {
 		deleteAfterTime, err := time.Parse(time.RFC3339, deleteAfterStr)
@@ -689,7 +697,7 @@ func (r *ShardedReconciler) handleDeletionTiming(obj *unstructured.Unstructured,
 			return false, err
 		}
 
-		if time.Now().After(deleteAfterTime) && (quaestorMarkedForDeletionExists || quaestorMarkedForDeletion == "true") {
+		if time.Now().After(deleteAfterTime) && (markedForDeletionExists || markedForDeletion == "true") {
 			// Time to delete
 			return true, nil
 		}
@@ -697,8 +705,8 @@ func (r *ShardedReconciler) handleDeletionTiming(obj *unstructured.Unstructured,
 		timeBeforeUnregister := deleteAfterTime.Add(-*r.TerminationPeriod)
 		if time.Now().After(timeBeforeUnregister) {
 
-			if !quaestorMarkedForDeletionExists || quaestorMarkedForDeletion != "true" {
-				annotations["k8s.tochka.com/quaestor-marked-for-deletion"] = "true"
+			if !markedForDeletionExists || markedForDeletion != "true" {
+				annotations[*r.UnregisterAnnotation] = "true"
 
 				if time.Now().Add(*r.TerminationPeriod).After(deleteAfterTime) {
 					futureTime := time.Now().Add(delTime).Format(time.RFC3339)
@@ -707,10 +715,10 @@ func (r *ShardedReconciler) handleDeletionTiming(obj *unstructured.Unstructured,
 
 				obj.SetAnnotations(annotations)
 				if err := r.Update(r.ctx, obj); err != nil {
-					logger.Error(err, "unable to update object with quaestor-marked-for-deletion annotation", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+					logger.Error(err, "unable to update object with marked-for-deletion annotation", "objectKind", obj.GetKind(), "objectName", obj.GetName())
 					return false, err
 				}
-				logger.Info("quaestor-marked-for-deletion annotation set", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+				logger.Info("marked-for-deletion annotation set", "objectKind", obj.GetKind(), "objectName", obj.GetName())
 				metrics.ProcessingCounter.WithLabelValues(r.ctrlName, shardName).Inc()
 			}
 		}

@@ -5,7 +5,7 @@ metadata:
   namespace: dummy
   annotations:
     k8s.tochka.com/mutate-hosts: basic
-    k8s.tochka.com/virtualhosts: test-app2.dummy.svc.cluster.local,dummy-test-app2.service.consul,dummy-test-app2.service.consul-pre,dummy-test-app2.query.consul,dummy-test-app2.query.consul-pre
+    k8s.tochka.com/virtualhosts: test-app2.dummy.svc.cluster.local,dummy-test-app2.cluster.domain,dummy-test-app2.cluster.domain-test,dummy-test-app2.another-cluster.domain,dummy-test-app2.another-cluster.domain-test
 spec:
   template:
     metadata:
@@ -14,7 +14,7 @@ spec:
         canary: "false"
       annotations:
         k8s.tochka.com/network-segment: general
-        k8s.tochka.com/quaestor-port: "443"
+        k8s.tochka.com/service-discovery-port: "443"
     spec:
       ingressClassName: vpn
       virtualhost:

@@ -18,7 +18,7 @@ spec:
       annotations:
         k8s.tochka.com/mutate-hosts: basic
         k8s.tochka.com/network-segment: general
-        k8s.tochka.com/quaestor-port: "443"
+        k8s.tochka.com/service-discovery-port: "443"
         nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     spec:
       # ingressClassName: default
