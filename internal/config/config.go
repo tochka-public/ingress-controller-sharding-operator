@@ -106,8 +106,6 @@ func LoadConfig(path string, runShardedIngress, runShardedHTTPProxy bool) (*Conf
 		}
 	}
 
-	fmt.Println(config)
-
 	if err := validateConfig(&config, runShardedIngress, runShardedHTTPProxy); err != nil {
 		return nil, err
 	}
