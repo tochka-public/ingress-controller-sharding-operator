@@ -36,6 +36,7 @@ type ConfigType struct {
 		Annotations     struct {
 			MutatingWebhook string `mapstructure:"mutatingWebhook"`
 		} `mapstructure:"annotations"`
+		FinalizerKey string `mapstructure:"finalizerKey"`
 	} `mapstructure:"general"`
 	AdditionalServiceDiscovery struct {
 		Labels struct {
@@ -65,6 +66,8 @@ func LoadConfig(path string, runShardedIngress, runShardedHTTPProxy bool) (*Conf
 
 	viper.SetDefault("shardedHTTPProxy.labels.rootHTTPProxy", "k8s.tochka.com/base-proxy")
 	viper.SetDefault("shardedHTTPProxy.annotations.virtualHosts", "k8s.tochka.com/virtual-hosts")
+
+	viper.SetDefault("general.finalizerKey", "k8s.tochka.com/sharded-controller-finalizer")
 
 	viper.SetDefault("additionalServiceDiscovery.labels.class", "k8s.tochka.com/ingress-class")
 	viper.SetDefault("additionalServiceDiscovery.labels.appName", "k8s.tochka.com/app-name")

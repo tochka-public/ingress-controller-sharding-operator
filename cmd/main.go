@@ -20,6 +20,7 @@ import (
 
 	contourv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+
 	controllerv1 "k8s.tochka.com/sharded-ingress-controller/api/v1"
 	"k8s.tochka.com/sharded-ingress-controller/internal/config"
 	"k8s.tochka.com/sharded-ingress-controller/internal/controller"
@@ -117,6 +118,7 @@ func main() {
 				AppNameLabel:                             &conf.AdditionalServiceDiscovery.Labels.AppName,
 				AllShardsPlacementAnnotation:             &conf.AllShardsPlacement.Annotations.Enabled,
 				AllShardsBaseHosts:                       &conf.AllShardsPlacement.ShardBaseDomains,
+				FinalizerKey:                             &conf.General.FinalizerKey,
 				WaitingList:                              make(map[string]bool),
 				ReadyList:                                make(map[string]bool),
 				ManagedList:                              make(map[string]bool),
@@ -152,6 +154,7 @@ func main() {
 				AppNameLabel:                             &conf.AdditionalServiceDiscovery.Labels.AppName,
 				AllShardsPlacementAnnotation:             &conf.AllShardsPlacement.Annotations.Enabled,
 				AllShardsBaseHosts:                       &conf.AllShardsPlacement.ShardBaseDomains,
+				FinalizerKey:                             &conf.General.FinalizerKey,
 				WaitingList:                              make(map[string]bool),
 				ReadyList:                                make(map[string]bool),
 				ManagedList:                              make(map[string]bool),

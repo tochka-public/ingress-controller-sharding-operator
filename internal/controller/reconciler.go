@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"k8s.tochka.com/sharded-ingress-controller/internal/k8s"
@@ -59,6 +60,7 @@ type ShardedReconciler struct {
 	AdditionalServiceDiscoveryTagsAnnotation *string
 	AppNameLabel                             *string
 	AllShardsPlacementAnnotation             *string
+	FinalizerKey                             *string
 	WaitingList                              map[string]bool
 	ReadyList                                map[string]bool
 	ManagedList                              map[string]bool
@@ -143,11 +145,8 @@ func (r *ShardedReconciler) createObject(newObject client.Object, shardName stri
 	return ctrl.Result{}, nil
 }
 
-func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[string]string) (ctrl.Result, error) {
-	logger := log.FromContext(r.ctx)
-	shdObj := r.ShardedObject
+func (r *ShardedReconciler) getObjectChildren() (unstructured.UnstructuredList, error) {
 	objKind := r.GetChildKind()
-	createdObjects := shdObj.GetCreatedObjects()
 	childObjs := unstructured.UnstructuredList{}
 
 	switch objKind {
@@ -164,64 +163,84 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 			Kind:    "HTTPProxyList",
 		})
 	default:
-		if objKind == "" {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, fmt.Errorf("unsupported object kind: %s", objKind)
+		return unstructured.UnstructuredList{}, fmt.Errorf("unsupported object kind: %s", objKind)
 	}
 
 	if err := r.List(r.ctx, &childObjs, client.InNamespace(r.req.Namespace)); err != nil {
+		return unstructured.UnstructuredList{}, err
+	}
+
+	res := unstructured.UnstructuredList{}
+	for _, childObj := range childObjs.Items {
+		for _, owner := range childObj.GetOwnerReferences() {
+			if owner.Name == r.ShardedObject.GetName() && owner.Kind == r.ShardedObject.GetKind() {
+				res.Items = append(res.Items, childObj)
+			}
+		}
+	}
+
+	return res, nil
+}
+
+func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[string]string) (ctrl.Result, error) {
+	logger := log.FromContext(r.ctx)
+	shdObj := r.ShardedObject
+	createdObjects := shdObj.GetCreatedObjects()
+	childObjs := unstructured.UnstructuredList{}
+
+	if r.GetChildKind() == "" {
+		return ctrl.Result{}, nil
+	}
+
+	childObjs, err := r.getObjectChildren()
+	if err != nil {
 		logger.Error(err, "unable to list child objects")
 		return ctrl.Result{}, err
 	}
 
 	for _, obj := range childObjs.Items {
-		for _, ownerRef := range obj.GetOwnerReferences() {
-			if ownerRef.Name == shdObj.GetName() && ownerRef.Kind == shdObj.GetKind() {
-				keep := false
-				var shardName string
-				for _, shard := range r.Shards {
-					if findInStatus(shard.ShardName, obj.GetKind(), obj.GetName(), &currentList) {
-						keep = true
-						shardName = shard.ShardName
-						break
-					}
-				}
+		keep := false
+		var shardName string
+		for _, shard := range r.Shards {
+			if findInStatus(shard.ShardName, obj.GetKind(), obj.GetName(), &currentList) {
+				keep = true
+				shardName = shard.ShardName
+				break
+			}
+		}
 
-				if !keep || (strings.HasPrefix(obj.GetName(), shdObj.GetName()) && strings.HasSuffix(obj.GetName(), "tmp")) {
-					for shard, status := range *createdObjects {
-						for _, objStatus := range status {
-							if objStatus["name"] == obj.GetName() {
-								shardName = shard
-							}
-						}
-					}
-					shouldDelete, err := r.handleDeletionTiming(&obj, shardName)
-					if err != nil {
-						logger.Error(err, "error handling deletion timing", "objectKind", obj.GetKind(), "objectName", obj.GetName())
-						return ctrl.Result{}, err
-					}
-					if shouldDelete {
-						if err := r.Client.Delete(r.ctx, &obj); err != nil {
-							logger.Error(err, "unable to delete", "objectKind", obj.GetKind(), "objectName", obj.GetName())
-							return ctrl.Result{}, err
-						}
-						logger.Info("successfully deleted from cluster", "objectKind", obj.GetKind(), "objectName", obj.GetName())
-						metrics.ProcessingCounter.WithLabelValues(r.ctrlName, shardName).Inc()
-						return ctrl.Result{}, nil
-					} else {
-						err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
-						if err != nil {
-							return ctrl.Result{}, err
-						}
-						return ctrl.Result{RequeueAfter: *r.TerminationPeriod}, nil
-					}
-				} else {
-					err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
-					if err != nil {
-						return ctrl.Result{}, err
+		if !keep || (strings.HasPrefix(obj.GetName(), shdObj.GetName()) && strings.HasSuffix(obj.GetName(), "tmp")) {
+			for shard, status := range *createdObjects {
+				for _, objStatus := range status {
+					if objStatus["name"] == obj.GetName() {
+						shardName = shard
 					}
 				}
+			}
+			shouldDelete, err := r.handleDeletionTiming(&obj, shardName)
+			if err != nil {
+				logger.Error(err, "error handling deletion timing", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+				return ctrl.Result{}, err
+			}
+			if shouldDelete {
+				if err := r.Client.Delete(r.ctx, &obj); err != nil {
+					logger.Error(err, "unable to delete", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+					return ctrl.Result{}, err
+				}
+				logger.Info("successfully deleted from cluster", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+				metrics.ProcessingCounter.WithLabelValues(r.ctrlName, shardName).Inc()
+				return ctrl.Result{}, nil
+			} else {
+				err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: *r.TerminationPeriod}, nil
+			}
+		} else {
+			err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
+			if err != nil {
+				return ctrl.Result{}, err
 			}
 		}
 	}
@@ -891,6 +910,24 @@ func (r *ShardedReconciler) handleNotFound(objKey string, logger logr.Logger) {
 	r.finalCleanKey(objKey)
 	r.updateCacheMetrics(objKey)
 	r.updateMetrics()
+}
+
+func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, error) {
+	childrenList, err := r.getObjectChildren()
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("", err)
+	}
+	if len(childrenList.Items) == 0 {
+		controllerutil.RemoveFinalizer(r.ShardedObject, finalizerKey)
+		err := r.Update(r.ctx, r.ShardedObject)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("cannot remove finalizer from object: %w", err)
+		}
+		log.FromContext(r.ctx).Info("removed finalizer from object")
+		return ctrl.Result{}, nil
+	}
+	log.FromContext(r.ctx).Info("delete all object children gracefully")
+	return r.deleteUnlistedObjects(nil)
 }
 
 func (r *ShardedReconciler) updateCacheMetrics(objKey string) {

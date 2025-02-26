@@ -34,6 +34,8 @@ general:
   annotations:
     # SHARDED_GENERAL_ANNOTATIONS_MUTATINGWEBHOOK
     mutatingWebhook: "k8s.tochka.com/mutate-hosts"
+  # SHARDED_GENERAL_FINALIZERKEY
+  finalizerKey: "k8s.tochka.com/sharded-controller-finalizer"
 
 additionalServiceDiscovery:
   labels:

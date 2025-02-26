@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -42,6 +43,7 @@ func (r *ShardedIngressReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		AdditionalServiceDiscoveryTagsAnnotation: r.AdditionalServiceDiscoveryTagsAnnotation,
 		AppNameLabel:                             r.AppNameLabel,
 		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
+		FinalizerKey:                             r.FinalizerKey,
 		WaitingList:                              r.WaitingList,
 		ReadyList:                                r.ReadyList,
 		ManagedList:                              r.ManagedList,
@@ -75,6 +77,19 @@ func (r *ShardedIngressReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		logger.Error(err, "unable to fetch ShardedIngress")
 		return ctrl.Result{}, err
+	}
+
+	// If object doesn't have finalizer — set finalizer
+	if r.ShardedIngress.GetObjectMeta().GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(r.ShardedIngress, *r.FinalizerKey) {
+		controllerutil.AddFinalizer(r.ShardedIngress, *r.FinalizerKey)
+		if err := r.Update(ctx, r.ShardedIngress); err != nil {
+			logger.Error(err, "unable to set controller finalizer on ShardedIngress")
+			return ctrl.Result{}, fmt.Errorf("cannot set controller finalizer: %w", err)
+		}
+	}
+
+	if !r.ShardedIngress.GetObjectMeta().GetDeletionTimestamp().IsZero() {
+		return r.handleFinalizer(*r.FinalizerKey)
 	}
 
 	if val := r.ShardedIngress.Annotations[*r.AllShardsPlacementAnnotation]; val == "true" {

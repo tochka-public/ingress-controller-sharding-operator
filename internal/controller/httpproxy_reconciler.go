@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	contourv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
@@ -44,6 +45,7 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		AdditionalServiceDiscoveryTagsAnnotation: r.AdditionalServiceDiscoveryTagsAnnotation,
 		AppNameLabel:                             r.AppNameLabel,
 		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
+		FinalizerKey:                             r.FinalizerKey,
 		WaitingList:                              r.WaitingList,
 		ReadyList:                                r.ReadyList,
 		ManagedList:                              r.ManagedList,
@@ -77,6 +79,19 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		logger.Error(err, "unable to fetch ShardedHTTPProxy")
 		return ctrl.Result{}, err
+	}
+
+	// If object doesn't have finalizer — set finalizer
+	if r.ShardedHTTPProxy.GetObjectMeta().GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(r.ShardedHTTPProxy, *r.FinalizerKey) {
+		controllerutil.AddFinalizer(r.ShardedHTTPProxy, *r.FinalizerKey)
+		if err := r.Update(ctx, r.ShardedHTTPProxy); err != nil {
+			logger.Error(err, "unable to set controller finalizer on ShardedHTTPProxy")
+			return ctrl.Result{}, fmt.Errorf("cannot set controller finalizer: %w", err)
+		}
+	}
+
+	if !r.ShardedHTTPProxy.GetObjectMeta().GetDeletionTimestamp().IsZero() {
+		return r.handleFinalizer(*r.FinalizerKey)
 	}
 
 	if val, ok := r.ShardedHTTPProxy.Annotations[*r.AllShardsPlacementAnnotation]; ok && val == "true" {
