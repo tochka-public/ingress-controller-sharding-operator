@@ -28,6 +28,12 @@ rateLimit:
   apiRateLimit: 10
   apiBurstLimit: 100
 
+finalizer:
+  # SHARDED_FINALIZER_KEY
+  key: k8s.tochka.com/sharded-controller-finalizer
+  # SHARDED_FINALIZER_TERMINATIONPERIOD
+  terminationPeriod: 5m
+
 general:
   # SHARDED_GENERAL_DOMAINSUBSTRING
   domainSubstring: "domain"

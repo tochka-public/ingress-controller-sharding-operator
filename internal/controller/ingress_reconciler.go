@@ -44,6 +44,7 @@ func (r *ShardedIngressReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		AppNameLabel:                             r.AppNameLabel,
 		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
 		FinalizerKey:                             r.FinalizerKey,
+		FinalizerTerminationPeriod:               r.FinalizerTerminationPeriod,
 		WaitingList:                              r.WaitingList,
 		ReadyList:                                r.ReadyList,
 		ManagedList:                              r.ManagedList,

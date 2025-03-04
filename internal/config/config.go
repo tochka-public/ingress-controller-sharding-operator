@@ -31,12 +31,15 @@ type ConfigType struct {
 		ApiRateLimit  int `mapstructure:"apiRateLimit"`
 		ApiBurstLimit int `mapstructure:"apiBurstLimit"`
 	} `mapstructure:"rateLimit"`
+	Finalizer struct {
+		Key               string        `mapstructure:"key"`
+		TerminationPeriod time.Duration `mapstructure:"terminationPeriod"`
+	} `mapstructure:"finalizer"`
 	General struct {
 		DomainSubstring string `mapstructure:"domainSubstring"`
 		Annotations     struct {
 			MutatingWebhook string `mapstructure:"mutatingWebhook"`
 		} `mapstructure:"annotations"`
-		FinalizerKey string `mapstructure:"finalizerKey"`
 	} `mapstructure:"general"`
 	AdditionalServiceDiscovery struct {
 		Labels struct {
@@ -59,15 +62,16 @@ type ConfigType struct {
 func LoadConfig(path string, runShardedIngress, runShardedHTTPProxy bool) (*ConfigType, error) {
 	viper.SetOptions(viper.ExperimentalBindStruct())
 	viper.SetConfigType("yaml")
-	viper.SetDefault("rateLimit.objectUpdateCooldown", 30*time.Second)
-	viper.SetDefault("rateLimit.shardUpdateCooldown", 10*time.Second)
+	viper.SetDefault("rateLimit.updateCooldown.object", 30*time.Second)
+	viper.SetDefault("rateLimit.updateCooldown.shard", 10*time.Second)
 	viper.SetDefault("rateLimit.apiRateLimit", 10)
 	viper.SetDefault("rateLimit.apiBurstLimit", 100)
 
 	viper.SetDefault("shardedHTTPProxy.labels.rootHTTPProxy", "k8s.tochka.com/base-proxy")
 	viper.SetDefault("shardedHTTPProxy.annotations.virtualHosts", "k8s.tochka.com/virtual-hosts")
 
-	viper.SetDefault("general.finalizerKey", "k8s.tochka.com/sharded-controller-finalizer")
+	viper.SetDefault("finalizer.key", "k8s.tochka.com/sharded-controller-finalizer")
+	viper.SetDefault("finalizer.terminationPeriod", 5*time.Minute)
 
 	viper.SetDefault("additionalServiceDiscovery.labels.class", "k8s.tochka.com/ingress-class")
 	viper.SetDefault("additionalServiceDiscovery.labels.appName", "k8s.tochka.com/app-name")
