@@ -959,8 +959,8 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 
 	// step 1: get object children
 	// step 2: mark all children for deletion, set unregister mark instantly
-	// step 3: check what children should be deleted now, delete them
-	// step 4: if no children left - return empty ctrl.Result, otherwise return requeueAfter: finalizerTerminationPeriod
+	// step 3: check which children should be deleted now, delete them
+	// step 4: if no children left waiting for deletion - remove finalizer, otherwise requeue after finalizerTerminationPeriod
 	waitingForDeletion := 0
 	for _, child := range childrenList.Items {
 		var shardName string
@@ -977,13 +977,13 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 			annotations = map[string]string{}
 		}
 
-		deleteAfter, exists, err := parseDeleteAfterAnnotation(&child)
+		deleteAfter, deleteAfterExists, err := parseDeleteAfterAnnotation(&child)
 		if err != nil {
 			logger.Error(err, "[finalizer] unable to parse auto-delete-after annotation", "objectKind", child.GetKind(), "objectName", child.GetName())
 			return ctrl.Result{}, fmt.Errorf("[finalizer] cannot parse delete after annotation: %w", err)
 		}
 
-		if !exists || !r.isObjectMarkedForDeletion(&child) {
+		if !deleteAfterExists || !r.isObjectMarkedForDeletion(&child) {
 			r.markObjectForDeletion(&child)
 			r.updateDeleteAfterAnnotation(&child, *r.FinalizerTerminationPeriod)
 
@@ -1007,7 +1007,6 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		}
 	}
 
-	// If object have no children - remove finalizer and allow normal deletion
 	if waitingForDeletion == 0 {
 		controllerutil.RemoveFinalizer(r.ShardedObject, finalizerKey)
 		err := r.Update(r.ctx, r.ShardedObject)
