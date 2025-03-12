@@ -955,8 +955,6 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		return ctrl.Result{}, fmt.Errorf("cannot get children list: %w", err)
 	}
 
-	log.FromContext(r.ctx).Info("[finalizer] mark all object children gracefully")
-
 	// step 1: get object children
 	// step 2: mark all children for deletion, set unregister mark instantly
 	// step 3: check which children should be deleted now, delete them
@@ -972,11 +970,6 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 			}
 		}
 
-		annotations := child.GetAnnotations()
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-
 		deleteAfter, deleteAfterExists, err := parseDeleteAfterAnnotation(&child)
 		if err != nil {
 			logger.Error(err, "[finalizer] unable to parse auto-delete-after annotation", "objectKind", child.GetKind(), "objectName", child.GetName())
@@ -984,6 +977,7 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		}
 
 		if !deleteAfterExists || !r.isObjectMarkedForDeletion(&child) {
+			logger.Info("[finalizer] mark child for deletion", "objectKind", child.GetKind(), "objectName", child.GetName())
 			r.markObjectForDeletion(&child)
 			r.updateDeleteAfterAnnotation(&child, *r.FinalizerTerminationPeriod)
 
@@ -996,6 +990,7 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		}
 
 		if time.Now().After(deleteAfter) {
+			logger.Info("[finalizer] deleting child", "objectKind", child.GetKind(), "objectName", child.GetName())
 			if err := r.Delete(r.ctx, &child); err != nil {
 				logger.Error(err, "[finalizer] unable to delete child", "objectKind", child.GetKind(), "objectName", child.GetName())
 				return ctrl.Result{}, err
@@ -1008,12 +1003,27 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 	}
 
 	if waitingForDeletion == 0 {
-		controllerutil.RemoveFinalizer(r.ShardedObject, finalizerKey)
-		err := r.Update(r.ctx, r.ShardedObject)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("cannot remove finalizer from object: %w", err)
+		if err := r.Get(r.ctx, r.req.NamespacedName, r.ShardedObject); err != nil {
+			if errors.IsNotFound(err) {
+				logger.Info("[finalizer] object not found, finalizer removal skipped")
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("[finalizer] failed to refresh object: %w", err)
 		}
-		log.FromContext(r.ctx).Info("removed finalizer from object")
+
+		controllerutil.RemoveFinalizer(r.ShardedObject, finalizerKey)
+		if err := r.Update(r.ctx, r.ShardedObject); err != nil {
+			if errors.IsConflict(err) {
+				logger.Info("[finalizer] version conflict during finalizer removal, requeueing")
+				return ctrl.Result{Requeue: true}, nil
+			}
+			if errors.IsNotFound(err) {
+				logger.Info("[finalizer] object not found after finalizer removal, finalizer loop skipped")
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("cannot remove finalizer: %w", err)
+		}
+		logger.Info("successfully removed finalizer from object")
 		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{RequeueAfter: *r.FinalizerTerminationPeriod}, nil
