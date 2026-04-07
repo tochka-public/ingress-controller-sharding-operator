@@ -62,6 +62,7 @@ type ShardedReconciler struct {
 	AllShardsPlacementAnnotation             *string
 	FinalizerKey                             *string
 	FinalizerTerminationPeriod               *time.Duration
+	FinalizerDeletionTerminationPeriod       *time.Duration
 	WaitingList                              map[string]bool
 	ReadyList                                map[string]bool
 	ManagedList                              map[string]bool
@@ -979,7 +980,7 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		if !deleteAfterExists || !r.isObjectMarkedForDeletion(&child) {
 			logger.Info("[finalizer] mark child for deletion", "objectKind", child.GetKind(), "objectName", child.GetName())
 			r.markObjectForDeletion(&child)
-			r.updateDeleteAfterAnnotation(&child, *r.FinalizerTerminationPeriod)
+			r.updateDeleteAfterAnnotation(&child, *r.FinalizerDeletionTerminationPeriod)
 
 			if err := r.Update(r.ctx, &child); err != nil {
 				logger.Error(err, "[finalizer] unable to set auto-delete-after and unregister annotation on child", "objectKind", child.GetKind(), "objectName", child.GetName())
@@ -1026,7 +1027,7 @@ func (r *ShardedReconciler) handleFinalizer(finalizerKey string) (ctrl.Result, e
 		logger.Info("successfully removed finalizer from object")
 		return ctrl.Result{}, nil
 	}
-	return ctrl.Result{RequeueAfter: *r.FinalizerTerminationPeriod}, nil
+	return ctrl.Result{RequeueAfter: *r.FinalizerDeletionTerminationPeriod}, nil
 }
 
 func (r *ShardedReconciler) updateCacheMetrics(objKey string) {

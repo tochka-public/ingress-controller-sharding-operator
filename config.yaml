@@ -33,6 +33,8 @@ finalizer:
   key: k8s.tochka.com/sharded-controller-finalizer
   # SHARDED_FINALIZER_TERMINATIONPERIOD
   terminationPeriod: 5m
+  # SHARDED_FINALIZER_DELETIONTERMINATIONPERIOD
+  deletionTerminationPeriod: 1m
 
 general:
   # SHARDED_GENERAL_DOMAINSUBSTRING

@@ -47,6 +47,7 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		AllShardsPlacementAnnotation:             r.AllShardsPlacementAnnotation,
 		FinalizerKey:                             r.FinalizerKey,
 		FinalizerTerminationPeriod:               r.FinalizerTerminationPeriod,
+		FinalizerDeletionTerminationPeriod:       r.FinalizerDeletionTerminationPeriod,
 		WaitingList:                              r.WaitingList,
 		ReadyList:                                r.ReadyList,
 		ManagedList:                              r.ManagedList,
