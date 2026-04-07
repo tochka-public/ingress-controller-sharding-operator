@@ -15,7 +15,8 @@ test class is divided into test-0, test-1, test-2
 After updating the configuration, you need to restart the controller
 The controller does not allow you to install more shards than there are in the cluster
 
-The update cycle is a terminationPeroid * 3 to create a new object, update the old one and register a new object from dns systems (in our case, consul)
+The update cycle is a terminationPeriod * 3 to create a new object, update the old one and register a new object from dns systems (in our case, consul).
+A separate deletionTerminationPeriod is used specifically when a sharded object is deleted, allowing for a different finalizer termination period than the default used during resharding.
 
 Since the nginx config update operation inside the ingress controller can be resource-intensive (a complete re-creation of the configuration is required at the moment), a speed limit has been introduced for updating objects in the cluster
 
