@@ -142,7 +142,7 @@ func main() {
 			ShardedReconciler: controller.ShardedReconciler{
 				Client:                                   mgr.GetClient(),
 				Scheme:                                   mgr.GetScheme(),
-				MaxShards:                                conf.ShardedIngress.Shards,
+				MaxShards:                                conf.ShardedHTTPProxy.Shards,
 				TerminationPeriod:                        &conf.RateLimit.UpdateCooldown.Object,
 				ShardUpdateCooldown:                      &conf.RateLimit.UpdateCooldown.Shard,
 				DomainSubstring:                          &conf.General.DomainSubstring,
