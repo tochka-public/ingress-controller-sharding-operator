@@ -32,8 +32,9 @@ type ConfigType struct {
 		ApiBurstLimit int `mapstructure:"apiBurstLimit"`
 	} `mapstructure:"rateLimit"`
 	Finalizer struct {
-		Key               string        `mapstructure:"key"`
-		TerminationPeriod time.Duration `mapstructure:"terminationPeriod"`
+		Key                       string        `mapstructure:"key"`
+		TerminationPeriod         time.Duration `mapstructure:"terminationPeriod"`
+		DeletionTerminationPeriod time.Duration `mapstructure:"deletionTerminationPeriod"`
 	} `mapstructure:"finalizer"`
 	General struct {
 		DomainSubstring string `mapstructure:"domainSubstring"`
@@ -72,6 +73,7 @@ func LoadConfig(path string, runShardedIngress, runShardedHTTPProxy bool) (*Conf
 
 	viper.SetDefault("finalizer.key", "k8s.tochka.com/sharded-controller-finalizer")
 	viper.SetDefault("finalizer.terminationPeriod", 5*time.Minute)
+	viper.SetDefault("finalizer.deletionTerminationPeriod", time.Minute)
 
 	viper.SetDefault("additionalServiceDiscovery.labels.class", "k8s.tochka.com/ingress-class")
 	viper.SetDefault("additionalServiceDiscovery.labels.appName", "k8s.tochka.com/app-name")
