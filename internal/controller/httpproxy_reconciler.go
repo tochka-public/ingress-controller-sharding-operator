@@ -282,6 +282,14 @@ func (r *ShardedHTTPProxyReconciler) SetCreatedObjects(s map[string][]map[string
 	r.Status.CreatedObjects = s
 }
 
+func (r *ShardedHTTPProxyReconciler) SetCurrentObjects(s []controllerv1.ShardedObjectStatus) {
+	r.Status.CurrentObjects = s
+}
+
+func (r *ShardedHTTPProxyReconciler) SetMigration(s *controllerv1.ShardMigrationStatus) {
+	r.Status.Migration = s
+}
+
 func copyLabels(source map[string]string) map[string]string {
 	res := make(map[string]string, len(source))
 	for k, v := range source {

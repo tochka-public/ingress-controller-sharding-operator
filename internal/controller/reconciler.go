@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	controllerv1 "k8s.tochka.com/sharded-ingress-controller/api/v1"
 	"k8s.tochka.com/sharded-ingress-controller/internal/k8s"
 	"k8s.tochka.com/sharded-ingress-controller/internal/metrics"
 )
@@ -88,6 +89,8 @@ type ShardedObject interface {
 	client.Object
 	GetCreatedObjects() *map[string][]map[string]string
 	SetCreatedObjects(map[string][]map[string]string)
+	SetCurrentObjects([]controllerv1.ShardedObjectStatus)
+	SetMigration(*controllerv1.ShardMigrationStatus)
 	GetObject() client.Object
 	GetIngressClassName() string
 	GetKind() string
@@ -186,7 +189,7 @@ func (r *ShardedReconciler) getObjectChildren() (unstructured.UnstructuredList, 
 	return res, nil
 }
 
-func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[string]string) (ctrl.Result, error) {
+func (r *ShardedReconciler) deleteUnlistedObjects(desiredObjects map[string][]map[string]string) (ctrl.Result, error) {
 	logger := log.FromContext(r.ctx)
 	shdObj := r.ShardedObject
 	createdObjects := shdObj.GetCreatedObjects()
@@ -206,7 +209,7 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 		keep := false
 		var shardName string
 		for _, shard := range r.Shards {
-			if findInStatus(shard.ShardName, obj.GetKind(), obj.GetName(), &currentList) {
+			if findInStatus(shard.ShardName, obj.GetKind(), obj.GetName(), &desiredObjects) {
 				keep = true
 				shardName = shard.ShardName
 				break
@@ -239,6 +242,9 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 				if err != nil {
 					return ctrl.Result{}, err
 				}
+				if err := r.syncObservedStatus(&childObjs, desiredObjects); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: *r.TerminationPeriod}, nil
 			}
 		} else {
@@ -250,9 +256,9 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 	}
 
 	for shard, objStatusSlice := range *createdObjects {
-		// Check if the object exists in the currentList
+		// Check if the object exists in the desired objects calculated for this reconcile.
 		for _, objStatus := range objStatusSlice {
-			found := findInStatus(shard, objStatus["kind"], objStatus["name"], &currentList)
+			found := findInStatus(shard, objStatus["kind"], objStatus["name"], &desiredObjects)
 			if !found {
 				obj := &unstructured.Unstructured{}
 				obj.SetKind(objStatus["kind"])
@@ -273,6 +279,9 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 	}
 
 	r.moveKeyBetweenMultipleLists(r.objKey, []map[string]bool{r.WaitingList, r.ErrorList}, []map[string]bool{r.ReadyList})
+	if err := r.syncObservedStatus(&childObjs, desiredObjects); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -491,6 +500,123 @@ func findInStatus(shard, kind, name string, createdObjects *map[string][]map[str
 	return false
 }
 
+func objectStatusShard(kind, name string, objects map[string][]map[string]string) string {
+	for shard, objList := range objects {
+		for _, obj := range objList {
+			if obj["kind"] == kind && obj["name"] == name {
+				return shard
+			}
+		}
+	}
+	return ""
+}
+
+func statusShards(objects map[string][]map[string]string) []string {
+	shards := make([]string, 0, len(objects))
+	for shard, objList := range objects {
+		if len(objList) > 0 {
+			shards = append(shards, shard)
+		}
+	}
+	sort.Strings(shards)
+	return shards
+}
+
+func (r *ShardedReconciler) childIngressClass(obj *unstructured.Unstructured) string {
+	ingressClass, _, _ := unstructured.NestedString(obj.Object, "spec", "ingressClassName")
+	return ingressClass
+}
+
+func (r *ShardedReconciler) childStatus(obj *unstructured.Unstructured, desiredObjects map[string][]map[string]string, previousObjects map[string][]map[string]string) controllerv1.ShardedObjectStatus {
+	annotations := obj.GetAnnotations()
+	deleteAfter := ""
+	markedForDeletion := false
+	if annotations != nil {
+		deleteAfter = annotations[AutoDeleteAfterAnnotation]
+		markedForDeletion = annotations[*r.UnregisterAnnotation] == "true"
+	}
+
+	kind := obj.GetKind()
+	name := obj.GetName()
+	shard := objectStatusShard(kind, name, desiredObjects)
+	if shard == "" {
+		shard = objectStatusShard(kind, name, previousObjects)
+	}
+	if shard == "" {
+		shard = r.childIngressClass(obj)
+	}
+
+	temporary := strings.HasPrefix(name, r.ShardedObject.GetName()) && strings.HasSuffix(name, "tmp")
+	phase := "current"
+	if markedForDeletion || deleteAfter != "" {
+		phase = "deleting"
+	}
+	if temporary {
+		phase = "temporary"
+	}
+
+	return controllerv1.ShardedObjectStatus{
+		Kind:              kind,
+		Name:              name,
+		Namespace:         obj.GetNamespace(),
+		Shard:             shard,
+		IngressClass:      r.childIngressClass(obj),
+		Phase:             phase,
+		DeleteAfter:       deleteAfter,
+		Temporary:         temporary,
+		MarkedForDeletion: markedForDeletion,
+	}
+}
+
+func (r *ShardedReconciler) syncObservedStatus(childObjs *unstructured.UnstructuredList, desiredObjects map[string][]map[string]string) error {
+	previousObjects := *r.ShardedObject.GetCreatedObjects()
+	currentObjects := make(map[string][]map[string]string)
+	currentDetails := make([]controllerv1.ShardedObjectStatus, 0, len(childObjs.Items))
+	staleObjects := []controllerv1.ShardedObjectStatus{}
+	temporaryObjects := []controllerv1.ShardedObjectStatus{}
+
+	for _, obj := range childObjs.Items {
+		status := r.childStatus(&obj, desiredObjects, previousObjects)
+		if status.Shard != "" {
+			currentObjects[status.Shard] = append(currentObjects[status.Shard], map[string]string{"kind": status.Kind, "name": status.Name})
+		}
+		currentDetails = append(currentDetails, status)
+		if !findInStatus(status.Shard, status.Kind, status.Name, &desiredObjects) {
+			staleObjects = append(staleObjects, status)
+		}
+		if status.Temporary {
+			temporaryObjects = append(temporaryObjects, status)
+		}
+	}
+
+	for shard := range currentObjects {
+		sort.Slice(currentObjects[shard], func(i, j int) bool {
+			return currentObjects[shard][i]["name"] < currentObjects[shard][j]["name"]
+		})
+	}
+	sort.Slice(currentDetails, func(i, j int) bool {
+		if currentDetails[i].Shard == currentDetails[j].Shard {
+			return currentDetails[i].Name < currentDetails[j].Name
+		}
+		return currentDetails[i].Shard < currentDetails[j].Shard
+	})
+
+	migration := &controllerv1.ShardMigrationStatus{
+		FromShards:       statusShards(currentObjects),
+		ToShards:         statusShards(desiredObjects),
+		StaleObjects:     staleObjects,
+		TemporaryObjects: temporaryObjects,
+	}
+	migration.Active = !reflect.DeepEqual(migration.FromShards, migration.ToShards) || len(staleObjects) > 0 || len(temporaryObjects) > 0
+
+	return r.updateStatusWithRetry(func() error {
+		r.SetCreatedObjects(currentObjects)
+		r.ShardedObject.SetCurrentObjects(currentDetails)
+		r.ShardedObject.SetMigration(migration)
+		return r.updateStatus()
+	})
+}
+
 func (r *ShardedReconciler) GetCreatedObjects() *map[string][]map[string]string {
 	return r.ShardedObject.GetCreatedObjects()
 }
@@ -568,7 +694,10 @@ func (r *ShardedReconciler) GetKind() string {
 
 func (r *ShardedReconciler) applyObjectsToCluster(objList []NewChildObj) (ctrl.Result, error) {
 	logger := log.FromContext(r.ctx)
-	statusList := make(map[string][]map[string]string)
+	desiredObjects := make(map[string][]map[string]string)
+	for _, current := range objList {
+		desiredObjects[current.ShardName] = append(desiredObjects[current.ShardName], map[string]string{"kind": k8s.KindOf(current.Obj), "name": current.Obj.GetName()})
+	}
 
 	if !r.keyManaged(r.objKey) {
 		r.addKey(r.objKey, r.ManagedList)
@@ -611,21 +740,9 @@ func (r *ShardedReconciler) applyObjectsToCluster(objList []NewChildObj) (ctrl.R
 			}
 			// No update needed, skip
 		}
-		if current.OldShard != "" {
-			if r.Regular {
-				current.Obj.SetName(r.ShardedObject.GetName())
-			} else {
-				current.Obj.SetName(fmt.Sprintf("%s-%d", r.ShardedObject.GetName(), current.Shard))
-			}
-			statusList[current.ShardName] = append(statusList[current.ShardName], map[string]string{"kind": k8s.KindOf(found), "name": current.Obj.GetName()})
-			current.Obj.SetName(fmt.Sprintf("%s-%d-%s", r.ShardedObject.GetName(), current.Shard, "tmp"))
-			statusList[current.ShardName] = append(statusList[current.ShardName], map[string]string{"kind": k8s.KindOf(found), "name": current.Obj.GetName()})
-		} else {
-			statusList[current.ShardName] = append(statusList[current.ShardName], map[string]string{"kind": k8s.KindOf(found), "name": current.Obj.GetName()})
-		}
 	}
 
-	result, err := r.deleteUnlistedObjects(statusList)
+	result, err := r.deleteUnlistedObjects(desiredObjects)
 	if err != nil {
 		logger.Error(err, "unable to delete unlisted objects")
 	}

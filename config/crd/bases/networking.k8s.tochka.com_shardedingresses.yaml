@@ -347,8 +347,95 @@ spec:
                   type: array
                 default: {}
                 description: |-
-                  INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-                  Important: Run "make" to regenerate code after modifying this file
+                  CreatedObjects contains currently observed child objects grouped by shard.
+                  It is kept for backward compatibility with older controller versions.
+                type: object
+              currentObjects:
+                description: CurrentObjects contains currently observed child objects
+                  with detailed state.
+                items:
+                  properties:
+                    deleteAfter:
+                      type: string
+                    ingressClass:
+                      type: string
+                    kind:
+                      type: string
+                    markedForDeletion:
+                      type: boolean
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    phase:
+                      type: string
+                    shard:
+                      type: string
+                    temporary:
+                      type: boolean
+                  type: object
+                type: array
+              migration:
+                description: Migration describes observed shard migration state.
+                properties:
+                  active:
+                    type: boolean
+                  fromShards:
+                    items:
+                      type: string
+                    type: array
+                  staleObjects:
+                    items:
+                      properties:
+                        deleteAfter:
+                          type: string
+                        ingressClass:
+                          type: string
+                        kind:
+                          type: string
+                        markedForDeletion:
+                          type: boolean
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        phase:
+                          type: string
+                        shard:
+                          type: string
+                        temporary:
+                          type: boolean
+                      type: object
+                    type: array
+                  temporaryObjects:
+                    items:
+                      properties:
+                        deleteAfter:
+                          type: string
+                        ingressClass:
+                          type: string
+                        kind:
+                          type: string
+                        markedForDeletion:
+                          type: boolean
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        phase:
+                          type: string
+                        shard:
+                          type: string
+                        temporary:
+                          type: boolean
+                      type: object
+                    type: array
+                  toShards:
+                    items:
+                      type: string
+                    type: array
+                required:
+                - active
                 type: object
             required:
             - createdObjects
