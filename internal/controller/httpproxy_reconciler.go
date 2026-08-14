@@ -142,8 +142,8 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 				// Create a deep copy for the tmp object to modify
 				tempShardedHTTPProxy := shardedHTTPProxy.DeepCopy()
 				tempShardedHTTPProxy.SetName(tempName)
-				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = r.Conflict
-				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, r.Conflict, nil)
+				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = conflict
+				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, conflict, nil)
 				tempHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
@@ -156,15 +156,9 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 					hosts := strings.Split(serverAlias, ",")
 
 					for i, host := range hosts {
-						var tls *contourv1.TLS
-						if tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost != nil && tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost.TLS != nil {
-							tls = tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost.TLS
-						}
+						virtualHost := newVirtualHostFromTemplate(tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost, host)
 
-						httpProxy := r.createHTTPProxy(tempShardedHTTPProxy, fmt.Sprintf("%s-%d", tempName, i), r.Conflict, &contourv1.VirtualHost{
-							Fqdn: host,
-							TLS:  tls,
-						})
+						httpProxy := r.createHTTPProxy(tempShardedHTTPProxy, fmt.Sprintf("%s-%d", tempName, i), conflict, virtualHost)
 
 						httpProxies = append(httpProxies, NewChildObj{
 							Shard:     shard.ShardNumber,
@@ -173,7 +167,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 						})
 					}
 				}
-				tempShardedHTTPProxy.Spec.Template.Annotations["old-shard"] = r.Conflict
+				tempShardedHTTPProxy.Spec.Template.Annotations["old-shard"] = conflict
 				ingressClass = conflict
 			}
 		} else {
@@ -204,15 +198,9 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 			hosts := strings.Split(serverAlias, ",")
 
 			for i, host := range hosts {
-				var tls *contourv1.TLS
-				if shardedHTTPProxy.Spec.Template.Spec.VirtualHost != nil && shardedHTTPProxy.Spec.Template.Spec.VirtualHost.TLS != nil {
-					tls = shardedHTTPProxy.Spec.Template.Spec.VirtualHost.TLS
-				}
+				virtualHost := newVirtualHostFromTemplate(shardedHTTPProxy.Spec.Template.Spec.VirtualHost, host)
 
-				httpProxy := r.createHTTPProxy(shardedHTTPProxy, fmt.Sprintf("%s-%d", mainHTTPProxyName, i), ingressClass, &contourv1.VirtualHost{
-					Fqdn: host,
-					TLS:  tls,
-				})
+				httpProxy := r.createHTTPProxy(shardedHTTPProxy, fmt.Sprintf("%s-%d", mainHTTPProxyName, i), ingressClass, virtualHost)
 
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
@@ -223,6 +211,17 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		}
 	}
 	return httpProxies, nil
+}
+
+// newVirtualHostFromTemplate copies the template's VirtualHost (all fields, current and future)
+// and replaces Fqdn with the given host.
+func newVirtualHostFromTemplate(template *contourv1.VirtualHost, host string) *contourv1.VirtualHost {
+	if template == nil {
+		return &contourv1.VirtualHost{Fqdn: host}
+	}
+	virtualHost := template.DeepCopy()
+	virtualHost.Fqdn = host
+	return virtualHost
 }
 
 func (r *ShardedHTTPProxyReconciler) createHTTPProxy(shardedHTTPProxy *controllerv1.ShardedHTTPProxy, name, ingressClass string, virtualHost *contourv1.VirtualHost) *contourv1.HTTPProxy {
