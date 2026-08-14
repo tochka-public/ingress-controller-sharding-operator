@@ -142,8 +142,8 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 				// Create a deep copy for the tmp object to modify
 				tempShardedHTTPProxy := shardedHTTPProxy.DeepCopy()
 				tempShardedHTTPProxy.SetName(tempName)
-				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = r.Conflict
-				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, r.Conflict, nil)
+				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = conflict
+				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, conflict, nil)
 				tempHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
@@ -158,7 +158,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 					for i, host := range hosts {
 						virtualHost := newVirtualHostFromTemplate(tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost, host)
 
-						httpProxy := r.createHTTPProxy(tempShardedHTTPProxy, fmt.Sprintf("%s-%d", tempName, i), r.Conflict, virtualHost)
+						httpProxy := r.createHTTPProxy(tempShardedHTTPProxy, fmt.Sprintf("%s-%d", tempName, i), conflict, virtualHost)
 
 						httpProxies = append(httpProxies, NewChildObj{
 							Shard:     shard.ShardNumber,
@@ -167,7 +167,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 						})
 					}
 				}
-				tempShardedHTTPProxy.Spec.Template.Annotations["old-shard"] = r.Conflict
+				tempShardedHTTPProxy.Spec.Template.Annotations["old-shard"] = conflict
 				ingressClass = conflict
 			}
 		} else {
