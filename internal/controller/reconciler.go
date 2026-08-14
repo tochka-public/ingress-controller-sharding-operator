@@ -76,7 +76,6 @@ type ShardedReconciler struct {
 	ShardedObject                            ShardedObject
 	ChildObject                              client.Object
 	Shards                                   []Shards
-	Conflict                                 string
 	SoftResharding                           bool
 	objKey                                   string
 	ctrlName                                 string
