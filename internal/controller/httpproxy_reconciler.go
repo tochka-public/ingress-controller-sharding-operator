@@ -147,7 +147,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 				tempHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
-					ShardName: ingressClass,
+					ShardName: shard.ShardName,
 					Obj:       tempHTTPProxy,
 				})
 
@@ -162,7 +162,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 
 						httpProxies = append(httpProxies, NewChildObj{
 							Shard:     shard.ShardNumber,
-							ShardName: ingressClass,
+							ShardName: shard.ShardName,
 							Obj:       httpProxy,
 						})
 					}
@@ -184,12 +184,18 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		}
 		shardedHTTPProxy.SetName(mainHTTPProxyName)
 
-		// Create the base HTTPProxy
+		// Create the base HTTPProxy.
+		// ShardName is the new shard even while the spec still carries the old
+		// ingress class: it is status bookkeeping, and deleteUnlistedObjects
+		// only keeps children listed under the current shards. Booking live
+		// children under the old shard makes it schedule them for deletion,
+		// and the next reconcile wipes the annotation it just set — an endless
+		// auto-delete-after churn that never finishes the migration.
 		baseHTTPProxy := r.createHTTPProxy(shardedHTTPProxy, mainHTTPProxyName, ingressClass, nil)
 		baseHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 		httpProxies = append(httpProxies, NewChildObj{
 			Shard:     shard.ShardNumber,
-			ShardName: ingressClass,
+			ShardName: shard.ShardName,
 			Obj:       baseHTTPProxy,
 		})
 
@@ -204,7 +210,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 
 				httpProxies = append(httpProxies, NewChildObj{
 					Shard:     shard.ShardNumber,
-					ShardName: ingressClass,
+					ShardName: shard.ShardName,
 					Obj:       httpProxy,
 				})
 			}
