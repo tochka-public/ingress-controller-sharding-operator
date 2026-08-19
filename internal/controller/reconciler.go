@@ -176,7 +176,7 @@ func (r *ShardedReconciler) getObjectChildren() (unstructured.UnstructuredList, 
 	res := unstructured.UnstructuredList{}
 	for _, childObj := range childObjs.Items {
 		for _, owner := range childObj.GetOwnerReferences() {
-			if owner.Name == r.ShardedObject.GetName() && owner.Kind == r.ShardedObject.GetKind() {
+			if owner.Name == r.ShardedObject.GetName() && owner.Kind == r.GetKind() {
 				res.Items = append(res.Items, childObj)
 			}
 		}
@@ -201,6 +201,7 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 		return ctrl.Result{}, err
 	}
 
+	pendingDeletion := false
 	for _, obj := range childObjs.Items {
 		keep := false
 		var shardName string
@@ -212,7 +213,7 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 			}
 		}
 
-		if !keep || (strings.HasPrefix(obj.GetName(), shdObj.GetName()) && strings.HasSuffix(obj.GetName(), "tmp")) {
+		if !keep || r.isTmpChildName(obj.GetName()) {
 			for shard, status := range *createdObjects {
 				for _, objStatus := range status {
 					if objStatus["name"] == obj.GetName() {
@@ -233,13 +234,14 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 				logger.Info("successfully deleted from cluster", "objectKind", obj.GetKind(), "objectName", obj.GetName())
 				metrics.ProcessingCounter.WithLabelValues(r.ctrlName, shardName).Inc()
 				return ctrl.Result{}, nil
-			} else {
-				err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{RequeueAfter: *r.TerminationPeriod}, nil
 			}
+			// Not due yet: keep iterating so the whole set of pending objects
+			// (e.g. the tmp tree) moves through the annotation phases together
+			// instead of one object per TerminationPeriod.
+			if err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects); err != nil {
+				return ctrl.Result{}, err
+			}
+			pendingDeletion = true
 		} else {
 			err := r.addToStatus(obj.GetKind(), obj.GetName(), shardName, createdObjects)
 			if err != nil {
@@ -250,19 +252,22 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 
 	for shard, objStatusSlice := range *createdObjects {
 		// Check if the object exists in the currentList
-		for _, objStatus := range objStatusSlice {
+		for _, objStatus := range append([]map[string]string(nil), objStatusSlice...) {
 			found := findInStatus(shard, objStatus["kind"], objStatus["name"], &currentList)
 			if !found {
-				obj := &unstructured.Unstructured{}
-				obj.SetKind(objStatus["kind"])
-				obj.SetAPIVersion(shdObj.GetObject().GetObjectKind().GroupVersionKind().Version)
-				obj.SetNamespace(shdObj.GetNamespace())
-				obj.SetName(objStatus["name"])
-				if err := r.Client.Get(r.ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}, obj); err != nil {
-					// If it does not exist, delete the object from the status
-					err := r.delFromCreatedObjects(objStatus["name"])
-					if err != nil {
-						logger.Error(err, "unable to update status", "objectKind", k8s.KindOf(shdObj), "objectName", obj.GetName())
+				// The status entry is stale when the object is gone from the
+				// cluster, or when it is tracked under another shard and its
+				// live class no longer matches this entry (a finished
+				// same-name migration between ingress classes). Stale entries
+				// must be removed: CheckReshardingConflict treats them as an
+				// active conflict and re-creates the tmp object over and over.
+				// Entries whose object still carries this entry's class stay:
+				// they are what keeps the conflict alive mid-migration.
+				class, exists := r.childIngressClass(objStatus["name"])
+				trackedElsewhere := nameInStatusList(objStatus["kind"], objStatus["name"], &currentList)
+				if !exists || (trackedElsewhere && class != "" && class != shard) {
+					if err := r.delFromCreatedObjectsInShard(shard, objStatus["name"]); err != nil {
+						logger.Error(err, "unable to update status", "objectKind", objStatus["kind"], "objectName", objStatus["name"])
 						return ctrl.Result{}, err
 					}
 				}
@@ -271,6 +276,9 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 		}
 	}
 
+	if pendingDeletion {
+		return ctrl.Result{RequeueAfter: *r.TerminationPeriod}, nil
+	}
 	r.moveKeyBetweenMultipleLists(r.objKey, []map[string]bool{r.WaitingList, r.ErrorList}, []map[string]bool{r.ReadyList})
 	return ctrl.Result{}, nil
 }
@@ -526,27 +534,53 @@ func (r *ShardedReconciler) addToCreatedObjects(shard, kind, name string) error 
 	})
 }
 
-func (r *ShardedReconciler) delFromCreatedObjects(obj string) error {
+// delFromCreatedObjectsInShard removes a single (shard, name) status entry,
+// leaving entries with the same name under other shards untouched.
+func (r *ShardedReconciler) delFromCreatedObjectsInShard(shard, name string) error {
 	return r.updateStatusWithRetry(func() error {
 		status := r.GetCreatedObjects()
-		removeObjFromStatus(status, obj)
+		objList, ok := (*status)[shard]
+		if !ok {
+			return nil
+		}
+		changed := false
+		for i, obj := range objList {
+			if obj["name"] == name {
+				(*status)[shard] = append(objList[:i], objList[i+1:]...)
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return nil
+		}
+		if len((*status)[shard]) == 0 {
+			delete(*status, shard)
+		}
 		r.SetCreatedObjects(*status)
 		return r.updateStatus()
 	})
 }
 
-func removeObjFromStatus(status *map[string][]map[string]string, obj string) {
-	for key, valSlice := range *status {
-		for i, valMap := range valSlice {
-			if valMap["name"] == obj {
-				(*status)[key] = append(valSlice[:i], valSlice[i+1:]...)
-				break
-			}
-		}
-		if len((*status)[key]) == 0 {
-			delete(*status, key)
+// isTmpChildName reports whether the name belongs to the tmp tree kept on the
+// old shard during class migration: the root "<name>-<shard>-tmp" or a
+// per-host copy "<name>-<shard>-tmp-<i>". The whole tree shares the tmp
+// deletion timeline (3x termination period) so root and hosts are
+// unregistered and deleted together.
+func (r *ShardedReconciler) isTmpChildName(name string) bool {
+	if !strings.HasPrefix(name, r.ShardedObject.GetName()) {
+		return false
+	}
+	return strings.HasSuffix(name, "tmp") || strings.Contains(name, "-tmp-")
+}
+
+func nameInStatusList(kind, name string, statusList *map[string][]map[string]string) bool {
+	for shard := range *statusList {
+		if findInStatus(shard, kind, name, statusList) {
+			return true
 		}
 	}
+	return false
 }
 
 func (r *ShardedReconciler) GetIngressClassName() string {
@@ -557,12 +591,27 @@ func (r *ShardedReconciler) GetShardInfo() ([]Shards, bool, error) {
 	return getShardInfo(r.ShardedObject.GetNamespace(), r.ShardedObject.GetIngressClassName(), r.MaxShards, r.UseAllShards)
 }
 
+// GetChildKind and GetKind must not rely on TypeMeta alone: the API machinery
+// leaves it empty on objects decoded from list responses, so kinds read from
+// fetched objects appear and disappear nondeterministically. An empty kind
+// silently disables child lookup (and with it the whole deletion flow).
 func (r *ShardedReconciler) GetChildKind() string {
-	return r.ChildObject.GetObjectKind().GroupVersionKind().Kind
+	if kind := r.ChildObject.GetObjectKind().GroupVersionKind().Kind; kind != "" {
+		return kind
+	}
+	return k8s.KindOf(r.ChildObject)
 }
 
 func (r *ShardedReconciler) GetKind() string {
-	return r.ShardedObject.GetObjectKind().GroupVersionKind().Kind
+	if kind := r.ShardedObject.GetObjectKind().GroupVersionKind().Kind; kind != "" {
+		return kind
+	}
+	if r.Scheme != nil {
+		if gvks, _, err := r.Scheme.ObjectKinds(r.ShardedObject); err == nil && len(gvks) > 0 {
+			return gvks[0].Kind
+		}
+	}
+	return ""
 }
 
 func (r *ShardedReconciler) applyObjectsToCluster(objList []NewChildObj) (ctrl.Result, error) {
@@ -690,11 +739,48 @@ func (r *ShardedReconciler) CheckReshardingConflict(newShard string, objName str
 	for oldShard, objs := range *r.ShardedObject.GetCreatedObjects() {
 		for _, obj := range objs {
 			if obj["name"] == objName && oldShard != newShard {
+				// A conflict is only real while the old child still exists and
+				// still carries a class other than the new shard. Status
+				// entries can outlive their objects (the stale status sweep
+				// only runs once no objects are pending deletion), and
+				// reporting a conflict from such a stale entry re-creates the
+				// tmp object and restarts the migration forever.
+				class, exists := r.childIngressClass(objName)
+				if !exists || class == newShard {
+					continue
+				}
 				return oldShard
 			}
 		}
 	}
 	return ""
+}
+
+// childIngressClass fetches the child object with the given name and returns
+// its ingress class. Unexpected API errors count as existing with an unknown
+// class so that a transient failure never drops an active resharding conflict.
+func (r *ShardedReconciler) childIngressClass(name string) (class string, exists bool) {
+	obj, ok := r.ChildObject.DeepCopyObject().(client.Object)
+	if !ok {
+		return "", false
+	}
+	err := r.Get(r.ctx, types.NamespacedName{Name: name, Namespace: r.ShardedObject.GetNamespace()}, obj)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return "", false
+		}
+		return "", true
+	}
+	switch child := obj.(type) {
+	case *contourv1.HTTPProxy:
+		return child.Spec.IngressClassName, true
+	case *networkingv1.Ingress:
+		if child.Spec.IngressClassName != nil {
+			return *child.Spec.IngressClassName, true
+		}
+		return "", true
+	}
+	return "", true
 }
 
 func parseDeleteAfterAnnotation(obj *unstructured.Unstructured) (deleteAfter time.Time, exists bool, err error) {
@@ -753,8 +839,7 @@ func (r *ShardedReconciler) handleDeletionTiming(obj *unstructured.Unstructured,
 		return false, err
 	}
 	delTime := *r.TerminationPeriod * 2
-	isTempObject := (strings.HasPrefix(obj.GetName(), r.ShardedObject.GetName()) && strings.HasSuffix(obj.GetName(), "tmp"))
-	if isTempObject {
+	if r.isTmpChildName(obj.GetName()) {
 		delTime = *r.TerminationPeriod * 3
 	}
 	markedForDeletion := r.isObjectMarkedForDeletion(obj)
@@ -827,7 +912,15 @@ func (r *ShardedReconciler) addToStatus(kind string, name string, shardName stri
 }
 
 func (r *ShardedReconciler) checkTmpObjAnnotations(annotations map[string]string) (string, bool) {
-	if deleteAfterStr, exists := annotations["auto-delete-after"]; exists {
+	// Once the tmp object is being unregistered, the migration window is over
+	// for good: children must stay on the new shard class. Without this check
+	// the window reopens when markObjectForDeletion pushes auto-delete-after
+	// further out to let the tmp object drain, and children flap back to the
+	// old class.
+	if annotations[*r.UnregisterAnnotation] == "true" {
+		return "", false
+	}
+	if deleteAfterStr, exists := annotations[AutoDeleteAfterAnnotation]; exists {
 		deleteAfterTime, err := time.Parse(time.RFC3339, deleteAfterStr)
 		if err != nil {
 			return "", false
