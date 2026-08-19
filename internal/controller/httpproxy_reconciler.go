@@ -112,7 +112,7 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	httpProxies, err := r.NewHTTPProxiesFromShardedHTTPProxy()
 	if err != nil {
 		logger.Error(err, "children object can't be generated")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, nil
 	}
 
 	r.updateMetrics()
@@ -134,33 +134,47 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		conflict := r.CheckReshardingConflict(shard.ShardName, fmt.Sprintf("%s-%d", shardedHTTPProxy.Name, shard.ShardNumber))
 		ingressClass := shard.ShardName
 		tempName := fmt.Sprintf("%s-%d-%s", shardedHTTPProxy.Name, shard.ShardNumber, "tmp")
+		obj := r.ShardedReconciler.ChildObject
 
-		// oldShard is non-empty while the migration window is open: the tmp
-		// tree holds the old shard so service discovery keeps serving it while
-		// the main children move to the new class.
-		var oldShard string
-		tmpRoot := &contourv1.HTTPProxy{}
-		err := r.Get(r.ctx, types.NamespacedName{Name: tempName, Namespace: shardedHTTPProxy.GetNamespace()}, tmpRoot)
-		switch {
-		case err == nil:
-			if oldClass, ok := r.checkTmpObjAnnotations(tmpRoot.GetAnnotations()); ok {
-				oldShard = oldClass
-			}
-		case errors.IsNotFound(err):
-			oldShard = conflict
-		default:
-			// Deciding without knowing whether the tmp object exists would
-			// flip the main children to the new class ahead of time.
-			return nil, fmt.Errorf("unable to get tmp object %s: %w", tempName, err)
-		}
+		err := r.Get(r.ctx, types.NamespacedName{Name: tempName, Namespace: shardedHTTPProxy.GetNamespace()}, obj)
+		if err != nil {
+			if errors.IsNotFound(err) && conflict != "" {
+				// Create a deep copy for the tmp object to modify
+				tempShardedHTTPProxy := shardedHTTPProxy.DeepCopy()
+				tempShardedHTTPProxy.SetName(tempName)
+				tempShardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = conflict
+				tempHTTPProxy := r.createHTTPProxy(tempShardedHTTPProxy, tempName, conflict, nil)
+				tempHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
+				httpProxies = append(httpProxies, NewChildObj{
+					Shard:     shard.ShardNumber,
+					ShardName: shard.ShardName,
+					Obj:       tempHTTPProxy,
+				})
 
-		if oldShard != "" {
-			ingressClass = oldShard
-			tmpTree, err := r.newTmpTree(shardedHTTPProxy, tempName, oldShard, shard)
-			if err != nil {
-				return nil, err
+				// Handle virtual hosts for the tmp object
+				if serverAlias, exists := tempShardedHTTPProxy.Annotations[*r.VirtualHostsHTTPProxyAnnotation]; exists && serverAlias != "" {
+					hosts := strings.Split(serverAlias, ",")
+
+					for i, host := range hosts {
+						virtualHost := newVirtualHostFromTemplate(tempShardedHTTPProxy.Spec.Template.Spec.VirtualHost, host)
+
+						httpProxy := r.createHTTPProxy(tempShardedHTTPProxy, fmt.Sprintf("%s-%d", tempName, i), conflict, virtualHost)
+
+						httpProxies = append(httpProxies, NewChildObj{
+							Shard:     shard.ShardNumber,
+							ShardName: shard.ShardName,
+							Obj:       httpProxy,
+						})
+					}
+				}
+				tempShardedHTTPProxy.Spec.Template.Annotations["old-shard"] = conflict
+				ingressClass = conflict
 			}
-			httpProxies = append(httpProxies, tmpTree...)
+		} else {
+			if oldClass, ok := r.checkTmpObjAnnotations(obj.GetAnnotations()); ok {
+				ingressClass = oldClass
+				conflict = oldClass
+			}
 		}
 
 		mainHTTPProxyName := shardedHTTPProxy.Name
@@ -171,13 +185,12 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 		shardedHTTPProxy.SetName(mainHTTPProxyName)
 
 		// Create the base HTTPProxy.
-		// ShardName is always the new shard, even while the object spec still
-		// carries the old ingress class during migration: applyObjectsToCluster
-		// registers children in the status list under ShardName, and
-		// deleteUnlistedObjects only treats objects listed under the current
-		// shards as alive. Registering the main children under the old shard
-		// makes deleteUnlistedObjects schedule the live objects for deletion,
-		// which then loops setting/wiping auto-delete-after forever.
+		// ShardName is the new shard even while the spec still carries the old
+		// ingress class: it is status bookkeeping, and deleteUnlistedObjects
+		// only keeps children listed under the current shards. Booking live
+		// children under the old shard makes it schedule them for deletion,
+		// and the next reconcile wipes the annotation it just set — an endless
+		// auto-delete-after churn that never finishes the migration.
 		baseHTTPProxy := r.createHTTPProxy(shardedHTTPProxy, mainHTTPProxyName, ingressClass, nil)
 		baseHTTPProxy.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
 		httpProxies = append(httpProxies, NewChildObj{
@@ -206,71 +219,6 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 	return httpProxies, nil
 }
 
-// newTmpTree returns the tmp copies of the child tree (root proxy plus one
-// proxy per virtual host) that are still missing from the cluster. The whole
-// tree stays on the old shard for the duration of the migration window.
-//
-// Objects that already exist are deliberately left out: applyObjectsToCluster
-// would otherwise reconcile them back to the generated spec and wipe the
-// auto-delete-after annotation that drives their unregister/delete timeline.
-func (r *ShardedHTTPProxyReconciler) newTmpTree(shardedHTTPProxy *controllerv1.ShardedHTTPProxy, tempName, oldShard string, shard Shards) ([]NewChildObj, error) {
-	var objs []NewChildObj
-
-	tmpSharded := shardedHTTPProxy.DeepCopy()
-	tmpSharded.SetName(tempName)
-	tmpSharded.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = oldShard
-	tmpSharded.Spec.Template.Annotations["old-shard"] = oldShard
-
-	exists, err := r.childExists(tempName, tmpSharded.GetNamespace())
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		tmpRoot := r.createHTTPProxy(tmpSharded, tempName, oldShard, nil)
-		tmpRoot.ObjectMeta.Labels[*r.RootHTTPProxyLabel] = "true"
-		objs = append(objs, NewChildObj{
-			Shard:     shard.ShardNumber,
-			ShardName: shard.ShardName,
-			Obj:       tmpRoot,
-		})
-	}
-
-	serverAlias, hasAlias := tmpSharded.Annotations[*r.VirtualHostsHTTPProxyAnnotation]
-	if !hasAlias || serverAlias == "" {
-		return objs, nil
-	}
-
-	for i, host := range strings.Split(serverAlias, ",") {
-		hostName := fmt.Sprintf("%s-%d", tempName, i)
-		exists, err := r.childExists(hostName, tmpSharded.GetNamespace())
-		if err != nil {
-			return nil, err
-		}
-		if exists {
-			continue
-		}
-		virtualHost := newVirtualHostFromTemplate(tmpSharded.Spec.Template.Spec.VirtualHost, host)
-		objs = append(objs, NewChildObj{
-			Shard:     shard.ShardNumber,
-			ShardName: shard.ShardName,
-			Obj:       r.createHTTPProxy(tmpSharded, hostName, oldShard, virtualHost),
-		})
-	}
-
-	return objs, nil
-}
-
-func (r *ShardedHTTPProxyReconciler) childExists(name, namespace string) (bool, error) {
-	err := r.Get(r.ctx, types.NamespacedName{Name: name, Namespace: namespace}, &contourv1.HTTPProxy{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("unable to get %s: %w", name, err)
-	}
-	return true, nil
-}
-
 // newVirtualHostFromTemplate copies the template's VirtualHost (all fields, current and future)
 // and replaces Fqdn with the given host.
 func newVirtualHostFromTemplate(template *contourv1.VirtualHost, host string) *contourv1.VirtualHost {
@@ -285,14 +233,10 @@ func newVirtualHostFromTemplate(template *contourv1.VirtualHost, host string) *c
 func (r *ShardedHTTPProxyReconciler) createHTTPProxy(shardedHTTPProxy *controllerv1.ShardedHTTPProxy, name, ingressClass string, virtualHost *contourv1.VirtualHost) *contourv1.HTTPProxy {
 	httpProxy := &contourv1.HTTPProxy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: shardedHTTPProxy.Namespace,
-			// Both maps are copied: children built from the same template
-			// otherwise alias one map, so annotating a single child (for
-			// instance auto-delete-after on a tmp object) silently annotates
-			// all of its siblings.
-			Annotations: copyStringMap(shardedHTTPProxy.Spec.Template.Annotations),
-			Labels:      copyStringMap(shardedHTTPProxy.Spec.Template.Labels),
+			Name:        name,
+			Namespace:   shardedHTTPProxy.Namespace,
+			Annotations: shardedHTTPProxy.Spec.Template.Annotations,
+			Labels:      copyLabels(shardedHTTPProxy.Spec.Template.Labels),
 		},
 		Spec: contourv1.HTTPProxySpec{
 			VirtualHost:      virtualHost,
@@ -343,7 +287,7 @@ func (r *ShardedHTTPProxyReconciler) SetCreatedObjects(s map[string][]map[string
 	r.Status.CreatedObjects = s
 }
 
-func copyStringMap(source map[string]string) map[string]string {
+func copyLabels(source map[string]string) map[string]string {
 	res := make(map[string]string, len(source))
 	for k, v := range source {
 		res[k] = v
