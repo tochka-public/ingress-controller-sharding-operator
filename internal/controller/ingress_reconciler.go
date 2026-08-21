@@ -239,3 +239,11 @@ func (r *ShardedIngressReconciler) GetCreatedObjects() *map[string][]map[string]
 func (r *ShardedIngressReconciler) SetCreatedObjects(s map[string][]map[string]string) {
 	r.Status.CreatedObjects = s
 }
+
+func (r *ShardedIngressReconciler) SetCurrentObjects(s []controllerv1.ShardedObjectStatus) {
+	r.Status.CurrentObjects = s
+}
+
+func (r *ShardedIngressReconciler) SetMigration(s *controllerv1.ShardMigrationStatus) {
+	r.Status.Migration = s
+}

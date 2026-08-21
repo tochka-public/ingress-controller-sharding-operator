@@ -57,6 +57,14 @@ func (s *ShardedIngress) SetCreatedObjects(new map[string][]map[string]string) {
 	s.Status.CreatedObjects = new
 }
 
+func (s *ShardedIngress) SetCurrentObjects(new []ShardedObjectStatus) {
+	s.Status.CurrentObjects = new
+}
+
+func (s *ShardedIngress) SetMigration(new *ShardMigrationStatus) {
+	s.Status.Migration = new
+}
+
 func (s *ShardedIngress) GetObject() client.Object {
 	return s
 }

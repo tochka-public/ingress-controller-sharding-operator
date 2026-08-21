@@ -24,10 +24,38 @@ type ShardedHTTPProxySpec struct {
 
 // ShardedHTTPProxyStatus defines the observed state of ShardedHTTPProxy
 type ShardedStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// CreatedObjects contains currently observed child objects grouped by shard.
+	// It is kept for backward compatibility with older controller versions.
 	// +kubebuilder:default:={}
 	CreatedObjects map[string][]map[string]string `json:"createdObjects"`
+
+	// CurrentObjects contains currently observed child objects with detailed state.
+	// +optional
+	CurrentObjects []ShardedObjectStatus `json:"currentObjects,omitempty"`
+
+	// Migration describes observed shard migration state.
+	// +optional
+	Migration *ShardMigrationStatus `json:"migration,omitempty"`
+}
+
+type ShardedObjectStatus struct {
+	Kind              string `json:"kind,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Namespace         string `json:"namespace,omitempty"`
+	Shard             string `json:"shard,omitempty"`
+	IngressClass      string `json:"ingressClass,omitempty"`
+	Phase             string `json:"phase,omitempty"`
+	DeleteAfter       string `json:"deleteAfter,omitempty"`
+	Temporary         bool   `json:"temporary,omitempty"`
+	MarkedForDeletion bool   `json:"markedForDeletion,omitempty"`
+}
+
+type ShardMigrationStatus struct {
+	Active           bool                  `json:"active"`
+	FromShards       []string              `json:"fromShards,omitempty"`
+	ToShards         []string              `json:"toShards,omitempty"`
+	StaleObjects     []ShardedObjectStatus `json:"staleObjects,omitempty"`
+	TemporaryObjects []ShardedObjectStatus `json:"temporaryObjects,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -62,6 +90,14 @@ func (s *ShardedHTTPProxy) GetCreatedObjects() *map[string][]map[string]string {
 
 func (s *ShardedHTTPProxy) SetCreatedObjects(new map[string][]map[string]string) {
 	s.Status.CreatedObjects = new
+}
+
+func (s *ShardedHTTPProxy) SetCurrentObjects(new []ShardedObjectStatus) {
+	s.Status.CurrentObjects = new
+}
+
+func (s *ShardedHTTPProxy) SetMigration(new *ShardMigrationStatus) {
+	s.Status.Migration = new
 }
 
 func (s *ShardedHTTPProxy) GetObject() client.Object {
