@@ -68,6 +68,7 @@ func newTestShardedHTTPProxyReconciler(t *testing.T, sharded *controllerv1.Shard
 	vhAnnotation := testVHAnnotation
 	unregisterAnnotation := testUnregisterAnnotation
 	terminationPeriod := time.Minute
+	shardUpdateCooldown := 10 * time.Second
 
 	r := &ShardedHTTPProxyReconciler{ShardedHTTPProxy: sharded}
 	// TypeMeta drives GetChildKind, without which deleteUnlistedObjects bails
@@ -89,6 +90,7 @@ func newTestShardedHTTPProxyReconciler(t *testing.T, sharded *controllerv1.Shard
 		ShardedObject:                        sharded,
 		ChildObject:                          &r.ChildObject,
 		TerminationPeriod:                    &terminationPeriod,
+		ShardUpdateCooldown:                  &shardUpdateCooldown,
 		AdditionalServiceDiscoveryClassLabel: &classLabel,
 		RootHTTPProxyLabel:                   &rootLabel,
 		VirtualHostsHTTPProxyAnnotation:      &vhAnnotation,

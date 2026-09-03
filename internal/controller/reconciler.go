@@ -671,12 +671,29 @@ func (r *ShardedReconciler) CheckClusterShards() error {
 }
 
 func (r *ShardedReconciler) initApplyPlan(shardName string) {
+	if r.NextApplyTime == nil {
+		r.NextApplyTime = make(map[string]*applyPlan)
+	}
 	ap, exists := r.NextApplyTime[shardName]
 	if !exists {
 		ap = &applyPlan{}
 		r.NextApplyTime[shardName] = ap
 	}
 	ap.SetLastCreating(time.Now())
+}
+
+// applyPlanFor returns the apply plan of shardName, creating it on demand.
+// CheckClusterShards only seeds plans for the shards known at operator startup,
+// while a shard name reaching the rate limiter may also come from an ingress
+// class created later, or from the status of an object that has been migrated
+// away from that class. Indexing NextApplyTime directly panics in those cases.
+func (r *ShardedReconciler) applyPlanFor(shardName string) *applyPlan {
+	ap, exists := r.NextApplyTime[shardName]
+	if !exists {
+		r.initApplyPlan(shardName)
+		ap = r.NextApplyTime[shardName]
+	}
+	return ap
 }
 
 func (r *ShardedReconciler) CheckReshardingConflict(newShard string, objName string) string {
@@ -1083,11 +1100,11 @@ func (r *ShardedReconciler) applyRateLimit(objKey string, logger logr.Logger) (c
 	}
 
 	if creating {
-		ap := r.NextApplyTime[currentShard]
+		ap := r.applyPlanFor(currentShard)
 		// check for future updates
-		if lastUpdatingTime.Add(-*r.ShardUpdateCooldown).Before(r.NextApplyTime[currentShard].lastCreating) {
+		if lastUpdatingTime.Add(-*r.ShardUpdateCooldown).Before(ap.lastCreating) {
 			// creating later
-			lastUpdatingTime = r.NextApplyTime[currentShard].lastCreating.Add(*r.ShardUpdateCooldown)
+			lastUpdatingTime = ap.lastCreating.Add(*r.ShardUpdateCooldown)
 		} else {
 			// last creating time is in the past
 			// creating now
@@ -1103,21 +1120,21 @@ func (r *ShardedReconciler) applyRateLimit(objKey string, logger logr.Logger) (c
 	}
 
 	if deleting {
-		ap := r.NextApplyTime[currentShard]
+		ap := r.applyPlanFor(currentShard)
 		// check for first deletion on shard
-		if lastDeletingTime.Add(-*r.ShardUpdateCooldown).Before(r.NextApplyTime[currentShard].lastCreating) && lastDeletingTime.After(r.NextApplyTime[currentShard].nextDeletingWindowStart) {
-			lastDeletingTime = r.NextApplyTime[currentShard].lastCreating
+		if lastDeletingTime.Add(-*r.ShardUpdateCooldown).Before(ap.lastCreating) && lastDeletingTime.After(ap.nextDeletingWindowStart) {
+			lastDeletingTime = ap.lastCreating
 			ap.SetLastCreating(lastDeletingTime.Add(*r.ShardUpdateCooldown))
 			ap.SetLastDeleting(lastDeletingTime.Add(*r.ShardUpdateCooldown))
 			ap.SetCurrentDeletingWindowStart(lastDeletingTime.Add(*r.TerminationPeriod))
 			ap.SetNextDeletingWindowStart(lastDeletingTime.Add(*r.TerminationPeriod * 3))
-			logger.Info("Print timings", "object", objKey, "last-creating", time.Until(r.NextApplyTime[currentShard].lastCreating), "last-deleting", time.Until(r.NextApplyTime[currentShard].lastDeleting), "current-deleting", time.Until(r.NextApplyTime[currentShard].currentDeletingWindowStart), "next-deleting", time.Until(r.NextApplyTime[currentShard].nextDeletingWindowStart))
+			logger.Info("Print timings", "object", objKey, "last-creating", time.Until(ap.lastCreating), "last-deleting", time.Until(ap.lastDeleting), "current-deleting", time.Until(ap.currentDeletingWindowStart), "next-deleting", time.Until(ap.nextDeletingWindowStart))
 		}
 
-		if lastDeletingTime.Add(*r.TerminationPeriod * 2).Before(r.NextApplyTime[currentShard].nextDeletingWindowStart) {
-			lastDeletingTime = r.NextApplyTime[currentShard].lastDeleting.Add(*r.ShardUpdateCooldown)
-		} else if lastDeletingTime.Add(*r.TerminationPeriod).Before(r.NextApplyTime[currentShard].nextDeletingWindowStart) {
-			lastDeletingTime = r.NextApplyTime[currentShard].nextDeletingWindowStart.Add(*r.ShardUpdateCooldown)
+		if lastDeletingTime.Add(*r.TerminationPeriod * 2).Before(ap.nextDeletingWindowStart) {
+			lastDeletingTime = ap.lastDeleting.Add(*r.ShardUpdateCooldown)
+		} else if lastDeletingTime.Add(*r.TerminationPeriod).Before(ap.nextDeletingWindowStart) {
+			lastDeletingTime = ap.nextDeletingWindowStart.Add(*r.ShardUpdateCooldown)
 			ap.SetCurrentDeletingWindowStart(lastDeletingTime.Add(*r.TerminationPeriod))
 			ap.SetNextDeletingWindowStart(lastDeletingTime.Add(*r.TerminationPeriod * 3))
 			logger.Info("New termination window created and deleting later in new termination window", "object", objKey, "delay", time.Until(lastDeletingTime))
@@ -1142,6 +1159,13 @@ func (r *ShardedReconciler) setShardInfo(logger logr.Logger) error {
 	if err != nil {
 		logger.Error(err, "Unable to use shard")
 		return err
+	}
+	// ingress classes may be created after CheckClusterShards has run at
+	// startup, so make sure each shard we apply to has an apply plan
+	for _, shard := range r.Shards {
+		if _, exists := r.NextApplyTime[shard.ShardName]; !exists {
+			r.initApplyPlan(shard.ShardName)
+		}
 	}
 	return nil
 }
