@@ -665,3 +665,31 @@ func TestDeleteUnlistedKeepsDuplicateOnAnotherClassOnDrain(t *testing.T) {
 		To(Succeed(), "a cross-class duplicate must not be short-circuited")
 	g.Expect(stray.Annotations).To(HaveKey(AutoDeleteAfterAnnotation))
 }
+
+// Inserting a host in the middle used to shift every later host up one index.
+// Because applyObjectsToCluster returns after the first create, the host
+// shifted off the end then had no proxy at all for the rest of the pass.
+func TestApplyObjectsInsertingHostLeavesExistingChildrenAlone(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,b,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "c", testNewShardClass),
+	)
+
+	// Every host must stay reachable through the whole convergence.
+	for pass := 0; pass < 5; pass++ {
+		objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+		g.Expect(err).NotTo(HaveOccurred())
+		_, err = r.applyObjectsToCluster(objs)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		byFqdn := liveFqdns(t, r.Client)
+		g.Expect(byFqdn["a"]).To(Equal([]string{"app-0"}), "pass %d", pass)
+		g.Expect(byFqdn["c"]).To(Equal([]string{"app-1"}), "pass %d", pass)
+	}
+
+	g.Expect(liveFqdns(t, r.Client)["b"]).To(Equal([]string{"app-2"}))
+}
