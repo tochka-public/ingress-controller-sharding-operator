@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	contourv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -581,4 +582,86 @@ func TestNewHTTPProxiesIgnoresTmpChildrenWhenAllocating(t *testing.T) {
 
 	_, main := findChild(t, objs, "app-0")
 	g.Expect(main.Spec.VirtualHost.Fqdn).To(Equal("a"))
+}
+
+// A cluster that is already carrying a duplicate must be healed on the first
+// pass rather than after the multi-period drain: while two objects collide on
+// one fqdn Contour serves neither, so draining protects nothing.
+func TestDeleteUnlistedRemovesDuplicateFqdnImmediately(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "c", testNewShardClass),
+		vhostChild("app-2", "c", testNewShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	_, err = r.applyObjectsToCluster(objs)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	gone := &contourv1.HTTPProxy{}
+	err = r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-2"}, gone)
+	g.Expect(errors.IsNotFound(err)).To(BeTrue(), "the duplicate must be deleted in this pass")
+
+	kept := &contourv1.HTTPProxy{}
+	g.Expect(r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-1"}, kept)).To(Succeed())
+	g.Expect(kept.Spec.VirtualHost.Fqdn).To(Equal("c"))
+	g.Expect(kept.Annotations).NotTo(HaveKey(AutoDeleteAfterAnnotation))
+
+	for fqdn, owners := range liveFqdns(t, r.Client) {
+		g.Expect(owners).To(HaveLen(1), "fqdn %q is claimed by %v", fqdn, owners)
+	}
+}
+
+// During a migration the tmp children mirror the main children's fqdns on
+// purpose. They must keep the normal drain even when the main children are
+// still on the old class, i.e. when the collision is within one class.
+func TestDeleteUnlistedKeepsTmpDuplicateOnDrain(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "c", testNewShardClass),
+		vhostChild("app-0-tmp-1", "c", testNewShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	_, err = r.applyObjectsToCluster(objs)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	tmp := &contourv1.HTTPProxy{}
+	g.Expect(r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-0-tmp-1"}, tmp)).
+		To(Succeed(), "tmp children must not be short-circuited")
+	g.Expect(tmp.Annotations).To(HaveKey(AutoDeleteAfterAnnotation))
+}
+
+// A stray on a different ingress class is not a DuplicateVhost - two Contour
+// instances each see one proxy - so it keeps the normal drain.
+func TestDeleteUnlistedKeepsDuplicateOnAnotherClassOnDrain(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "c", testNewShardClass),
+		vhostChild("app-9", "c", testOldShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	_, err = r.applyObjectsToCluster(objs)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	stray := &contourv1.HTTPProxy{}
+	g.Expect(r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-9"}, stray)).
+		To(Succeed(), "a cross-class duplicate must not be short-circuited")
+	g.Expect(stray.Annotations).To(HaveKey(AutoDeleteAfterAnnotation))
 }

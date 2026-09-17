@@ -185,6 +185,34 @@ func (r *ShardedReconciler) getObjectChildren() (unstructured.UnstructuredList, 
 	return res, nil
 }
 
+// isTempChild reports whether name belongs to the tmp object of this sharded
+// object or to one of its virtual host children. The HasSuffix("tmp") test used
+// elsewhere deliberately means the tmp root only; this one covers the whole tmp
+// tree, because during a migration those children mirror the main children's
+// fqdns on purpose and must keep the normal drain.
+func (r *ShardedReconciler) isTempChild(name string) bool {
+	if !strings.HasPrefix(name, r.ShardedObject.GetName()) {
+		return false
+	}
+	return strings.HasSuffix(name, "-tmp") || strings.Contains(name, "-tmp-")
+}
+
+// fqdnKey identifies a child by the virtual host it claims, scoped to the
+// ingress class it claims it on. Two children only collide when both parts
+// match: the tmp tree serves the same fqdns as the main tree during a
+// migration, but on the old class. Children with no fqdn - base proxies and
+// every Ingress - have no key.
+func fqdnKey(obj *unstructured.Unstructured) (string, bool) {
+	// "virtualhost" is all lowercase in Contour's json tags.
+	fqdn, found, err := unstructured.NestedString(obj.Object, "spec", "virtualhost", "fqdn")
+	if err != nil || !found || fqdn == "" {
+		return "", false
+	}
+	class, _, _ := unstructured.NestedString(obj.Object, "spec", "ingressClassName")
+	// A newline can appear in neither an ingress class nor an fqdn.
+	return class + "\n" + fqdn, true
+}
+
 func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[string]string) (ctrl.Result, error) {
 	logger := log.FromContext(r.ctx)
 	shdObj := r.ShardedObject
@@ -199,6 +227,29 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 	if err != nil {
 		logger.Error(err, "unable to list child objects")
 		return ctrl.Result{}, err
+	}
+
+	// Which fqdn/class pairs are served by a child that is staying. Built up
+	// front so the outcome does not depend on the order children come back in.
+	keptFqdns := map[string]string{}
+	for i := range childObjs.Items {
+		obj := &childObjs.Items[i]
+		if r.isTempChild(obj.GetName()) {
+			continue
+		}
+		listed := false
+		for _, shard := range r.Shards {
+			if findInStatus(shard.ShardName, obj.GetKind(), obj.GetName(), &currentList) {
+				listed = true
+				break
+			}
+		}
+		if !listed {
+			continue
+		}
+		if key, ok := fqdnKey(obj); ok {
+			keptFqdns[key] = obj.GetName()
+		}
 	}
 
 	for _, obj := range childObjs.Items {
@@ -220,6 +271,26 @@ func (r *ShardedReconciler) deleteUnlistedObjects(currentList map[string][]map[s
 					}
 				}
 			}
+			// A child that is staying already serves this fqdn on this
+			// ingress class. Contour rejects every proxy in an fqdn collision
+			// with DuplicateVhost, so the host is down for as long as this
+			// object lives. The grace period exists to let service discovery
+			// unregister a host, but here the surviving twin keeps the fqdn
+			// registered throughout, so draining protects nothing and only
+			// extends the outage.
+			if key, ok := fqdnKey(&obj); ok && !r.isTempChild(obj.GetName()) {
+				if owner, dup := keptFqdns[key]; dup && owner != obj.GetName() {
+					logger.Info("deleting child with duplicate fqdn immediately",
+						"objectKind", obj.GetKind(), "objectName", obj.GetName(), "duplicateOf", owner)
+					if err := r.Client.Delete(r.ctx, &obj); err != nil {
+						logger.Error(err, "unable to delete duplicate child", "objectKind", obj.GetKind(), "objectName", obj.GetName())
+						return ctrl.Result{}, err
+					}
+					metrics.ProcessingCounter.WithLabelValues(r.ctrlName, shardName).Inc()
+					return ctrl.Result{}, nil
+				}
+			}
+
 			shouldDelete, err := r.handleDeletionTiming(&obj, shardName)
 			if err != nil {
 				logger.Error(err, "error handling deletion timing", "objectKind", obj.GetKind(), "objectName", obj.GetName())
