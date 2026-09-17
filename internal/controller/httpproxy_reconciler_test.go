@@ -305,3 +305,280 @@ func TestCheckReshardingConflictUsesMainObjectNameInRegularMode(t *testing.T) {
 	_, main := findChild(t, objs, "app")
 	g.Expect(main.Spec.IngressClassName).To(Equal(testOldShardClass))
 }
+
+func testOwnerRef() []metav1.OwnerReference {
+	yes := true
+	return []metav1.OwnerReference{{
+		APIVersion:         controllerv1.GroupVersion.String(),
+		Kind:               "ShardedHTTPProxy",
+		Name:               "app",
+		Controller:         &yes,
+		BlockOwnerDeletion: &yes,
+	}}
+}
+
+// vhostChild builds an owned child HTTPProxy. An empty fqdn produces a child
+// with no virtualHost at all, i.e. a base/root proxy.
+func vhostChild(name, fqdn, class string) *contourv1.HTTPProxy {
+	child := &contourv1.HTTPProxy{
+		TypeMeta: metav1.TypeMeta{Kind: "HTTPProxy", APIVersion: contourv1.GroupVersion.String()},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       "default",
+			Labels:          map[string]string{testClassLabel: class},
+			OwnerReferences: testOwnerRef(),
+		},
+		Spec: contourv1.HTTPProxySpec{IngressClassName: class},
+	}
+	if fqdn != "" {
+		child.Spec.VirtualHost = &contourv1.VirtualHost{Fqdn: fqdn}
+	}
+	return child
+}
+
+// liveFqdns maps each fqdn in the cluster to the objects claiming it. Any entry
+// with more than one name is a DuplicateVhost.
+func liveFqdns(t *testing.T, c client.Client) map[string][]string {
+	t.Helper()
+	var list contourv1.HTTPProxyList
+	if err := c.List(context.Background(), &list, client.InNamespace("default")); err != nil {
+		t.Fatal(err)
+	}
+	byFqdn := map[string][]string{}
+	for _, item := range list.Items {
+		if item.Spec.VirtualHost == nil || item.Spec.VirtualHost.Fqdn == "" {
+			continue
+		}
+		byFqdn[item.Spec.VirtualHost.Fqdn] = append(byFqdn[item.Spec.VirtualHost.Fqdn], item.Name)
+	}
+	return byFqdn
+}
+
+func generatedNames(objs []NewChildObj) []string {
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.Obj.GetName())
+	}
+	return names
+}
+
+func TestVhostIndexAllocatorReusesIndexOnHostRemoval(t *testing.T) {
+	existing := []contourv1.HTTPProxy{
+		*vhostChild("app-0", "a", testNewShardClass),
+		*vhostChild("app-1", "b", testNewShardClass),
+		*vhostChild("app-2", "c", testNewShardClass),
+	}
+
+	for _, tc := range []struct {
+		name  string
+		hosts []string
+		want  []int
+	}{
+		{"middle host removed keeps the others pinned", []string{"a", "c"}, []int{0, 2}},
+		{"unchanged list allocates nothing new", []string{"a", "b", "c"}, []int{0, 1, 2}},
+		{"appended host takes the first free index", []string{"a", "b", "c", "d"}, []int{0, 1, 2, 3}},
+		{"a new host never takes an index a draining child still holds", []string{"x", "a"}, []int{3, 0}},
+		{"a repeated host maps to one index", []string{"a", "b", "a"}, []int{0, 1, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			alloc := allocatorFor(vhostAllocators(existing), "app")
+			got := make([]int, 0, len(tc.hosts))
+			for _, h := range tc.hosts {
+				got = append(got, alloc.indexFor(h))
+			}
+			g.Expect(got).To(Equal(tc.want))
+		})
+	}
+}
+
+func TestSplitIndexedName(t *testing.T) {
+	g := NewWithT(t)
+
+	for name, want := range map[string]struct {
+		prefix string
+		idx    int
+		ok     bool
+	}{
+		"app-0":       {"app", 0, true},
+		"app-0-12":    {"app-0", 12, true},
+		"app-0-tmp":   {"", 0, false},
+		"app-0-tmp-3": {"app-0-tmp", 3, true},
+		"app":         {"", 0, false},
+		"app-007":     {"", 0, false},
+		"app--1":      {"app-", 1, true},
+		"app-":        {"", 0, false},
+		"-0":          {"", 0, false},
+	} {
+		prefix, idx, ok := splitIndexedName(name)
+		g.Expect(ok).To(Equal(want.ok), "ok for %q", name)
+		if want.ok {
+			g.Expect(prefix).To(Equal(want.prefix), "prefix for %q", name)
+			g.Expect(idx).To(Equal(want.idx), "index for %q", name)
+		}
+	}
+}
+
+// Removing a host from the middle of the list must not renumber the hosts after
+// it. Positional names shifted them all down one index, which rewrote the fqdn
+// of every following child.
+func TestNewHTTPProxiesKeepsVhostIndexWhenMiddleHostRemoved(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "b", testNewShardClass),
+		vhostChild("app-2", "c", testNewShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(generatedNames(objs)).To(ConsistOf("app", "app-0", "app-2"))
+
+	_, first := findChild(t, objs, "app-0")
+	g.Expect(first.Spec.VirtualHost.Fqdn).To(Equal("a"))
+	_, last := findChild(t, objs, "app-2")
+	g.Expect(last.Spec.VirtualHost.Fqdn).To(Equal("c"))
+
+	seen := map[string]string{}
+	for _, o := range objs {
+		proxy := o.Obj.(*contourv1.HTTPProxy)
+		if proxy.Spec.VirtualHost == nil {
+			continue
+		}
+		fqdn := proxy.Spec.VirtualHost.Fqdn
+		g.Expect(seen).NotTo(HaveKey(fqdn), "fqdn %q generated twice", fqdn)
+		seen[fqdn] = proxy.Name
+	}
+}
+
+// The reported outage: after removing one vhost, two HTTPProxies carried the
+// same fqdn on the same ingress class and Contour rejected both.
+func TestApplyObjectsNeverProducesDuplicateFqdn(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app", "", testNewShardClass),
+		vhostChild("app-0", "a", testNewShardClass),
+		vhostChild("app-1", "b", testNewShardClass),
+		vhostChild("app-2", "c", testNewShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	_, err = r.applyObjectsToCluster(objs)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	for fqdn, owners := range liveFqdns(t, r.Client) {
+		g.Expect(owners).To(HaveLen(1), "fqdn %q is claimed by %v", fqdn, owners)
+	}
+
+	// The children that keep their host must not be touched at all, and only
+	// the child of the removed host may be scheduled for deletion.
+	var list contourv1.HTTPProxyList
+	g.Expect(r.Client.List(r.ctx, &list, client.InNamespace("default"))).To(Succeed())
+	scheduled := []string{}
+	for _, item := range list.Items {
+		if _, ok := item.Annotations[AutoDeleteAfterAnnotation]; ok {
+			scheduled = append(scheduled, item.Name)
+		}
+	}
+	g.Expect(scheduled).To(ConsistOf("app-1"))
+
+	got := &contourv1.HTTPProxy{}
+	g.Expect(r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-2"}, got)).To(Succeed())
+	g.Expect(got.Spec.VirtualHost.Fqdn).To(Equal("c"))
+	g.Expect(got.Annotations).NotTo(HaveKey(AutoDeleteAfterAnnotation))
+}
+
+// Building a tree from scratch takes one create per pass. No intermediate state
+// may show one fqdn on two objects, and the final layout must be the natural
+// one.
+func TestNewHTTPProxiesAllocatesStablyAcrossPartialCreation(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,b,c", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded)
+
+	for pass := 0; pass < 10; pass++ {
+		objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+		g.Expect(err).NotTo(HaveOccurred())
+		_, err = r.applyObjectsToCluster(objs)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		for fqdn, owners := range liveFqdns(t, r.Client) {
+			g.Expect(owners).To(HaveLen(1), "pass %d: fqdn %q is claimed by %v", pass, fqdn, owners)
+		}
+	}
+
+	byFqdn := liveFqdns(t, r.Client)
+	g.Expect(byFqdn["a"]).To(Equal([]string{"app-0"}))
+	g.Expect(byFqdn["b"]).To(Equal([]string{"app-1"}))
+	g.Expect(byFqdn["c"]).To(Equal([]string{"app-2"}))
+}
+
+// A leftover main object from another shard layout carries no virtualHost. It
+// holds its index without claiming a host, so no live fqdn is ever written onto
+// an object that is on its way out.
+func TestNewHTTPProxiesSkipsIndexHeldByChildWithoutVirtualHost(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,b,c,d,e", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app-3", "", testOldShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(generatedNames(objs)).To(ConsistOf("app", "app-0", "app-1", "app-2", "app-4", "app-5"))
+
+	untouched := &contourv1.HTTPProxy{}
+	g.Expect(r.Client.Get(r.ctx, types.NamespacedName{Namespace: "default", Name: "app-3"}, untouched)).To(Succeed())
+	g.Expect(untouched.Spec.VirtualHost).To(BeNil())
+}
+
+// A host repeated in the annotation must resolve to one child rather than two
+// objects racing for the same fqdn.
+func TestNewHTTPProxiesDeduplicatesRepeatedHosts(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a,b,a", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	byName := map[string]string{}
+	for _, o := range objs {
+		proxy := o.Obj.(*contourv1.HTTPProxy)
+		if proxy.Spec.VirtualHost == nil {
+			continue
+		}
+		if prev, seen := byName[proxy.Name]; seen {
+			g.Expect(proxy.Spec.VirtualHost.Fqdn).To(Equal(prev), "%s generated with two fqdns", proxy.Name)
+			continue
+		}
+		byName[proxy.Name] = proxy.Spec.VirtualHost.Fqdn
+	}
+	g.Expect(byName).To(Equal(map[string]string{"app-0": "a", "app-1": "b"}))
+}
+
+// tmp children live under their own name prefix, so they must not make the main
+// allocator think an index is taken.
+func TestNewHTTPProxiesIgnoresTmpChildrenWhenAllocating(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("a", nil)
+	r := newTestShardedHTTPProxyReconciler(t, sharded,
+		vhostChild("app-0-tmp-0", "a", testOldShardClass),
+	)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	_, main := findChild(t, objs, "app-0")
+	g.Expect(main.Spec.VirtualHost.Fqdn).To(Equal("a"))
+}
