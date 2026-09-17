@@ -131,7 +131,18 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 			shardedHTTPProxy.Spec.Template.Annotations = make(map[string]string)
 		}
 
-		conflict := r.CheckReshardingConflict(shard.ShardName, fmt.Sprintf("%s-%d", shardedHTTPProxy.Name, shard.ShardNumber))
+		// mainHTTPProxyName is the name applyObjectsToCluster books in the
+		// status, so it is also the name the resharding conflict has to be
+		// looked up under. Keying the lookup on "<name>-<shardNumber>"
+		// unconditionally asked about the first virtual host child instead of
+		// the main object whenever the class is unsharded, where the main
+		// object keeps the bare name.
+		mainHTTPProxyName := shardedHTTPProxy.Name
+		if r.ShardedObject.GetIngressClassName() != shard.ShardName {
+			mainHTTPProxyName = fmt.Sprintf("%s-%d", shardedHTTPProxy.Name, shard.ShardNumber)
+		}
+
+		conflict := r.CheckReshardingConflict(shard.ShardName, mainHTTPProxyName)
 		ingressClass := shard.ShardName
 		tempName := fmt.Sprintf("%s-%d-%s", shardedHTTPProxy.Name, shard.ShardNumber, "tmp")
 		obj := r.ShardedReconciler.ChildObject
@@ -177,11 +188,7 @@ func (r *ShardedHTTPProxyReconciler) NewHTTPProxiesFromShardedHTTPProxy() ([]New
 			}
 		}
 
-		mainHTTPProxyName := shardedHTTPProxy.Name
 		shardedHTTPProxy.Spec.Template.Labels[*r.AdditionalServiceDiscoveryClassLabel] = ingressClass
-		if r.ShardedObject.GetIngressClassName() != shard.ShardName {
-			mainHTTPProxyName = fmt.Sprintf("%s-%d", shardedHTTPProxy.Name, shard.ShardNumber)
-		}
 		shardedHTTPProxy.SetName(mainHTTPProxyName)
 
 		// Create the base HTTPProxy.

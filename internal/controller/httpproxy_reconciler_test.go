@@ -259,3 +259,49 @@ func TestApplyObjectsMigrationDoesNotChurnAutoDeleteOnMain(t *testing.T) {
 		}
 	}
 }
+
+// newRegularModeShardedHTTPProxy returns a ShardedHTTPProxy whose template
+// class equals the shard name, i.e. the unsharded ("Regular") layout in which
+// the main child keeps the bare object name and the virtual host children are
+// the ones named "app-0", "app-1", ...
+func newRegularModeShardedHTTPProxy(hosts string, status map[string][]map[string]string) *controllerv1.ShardedHTTPProxy {
+	sharded := &controllerv1.ShardedHTTPProxy{
+		TypeMeta:   metav1.TypeMeta{Kind: "ShardedHTTPProxy", APIVersion: controllerv1.GroupVersion.String()},
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
+		Spec: controllerv1.ShardedHTTPProxySpec{
+			Template: controllerv1.HTTPProxyTemplateSpec{
+				Spec: contourv1.HTTPProxySpec{
+					IngressClassName: testNewShardClass,
+					VirtualHost:      &contourv1.VirtualHost{Fqdn: "app.example.com"},
+				},
+			},
+		},
+		Status: controllerv1.ShardedStatus{CreatedObjects: status},
+	}
+	if hosts != "" {
+		sharded.Annotations = map[string]string{testVHAnnotation: hosts}
+	}
+	return sharded
+}
+
+// In Regular mode the main child keeps the bare object name, so the resharding
+// conflict has to be looked up under "app". Keying it on "app-0" asked about
+// the first virtual host child instead, which made conflict detection depend on
+// that child happening to exist at index 0.
+func TestCheckReshardingConflictUsesMainObjectNameInRegularMode(t *testing.T) {
+	g := NewWithT(t)
+
+	sharded := newRegularModeShardedHTTPProxy("", map[string][]map[string]string{
+		testOldShardClass: {{"kind": "HTTPProxy", "name": "app"}},
+	})
+	r := newTestShardedHTTPProxyReconciler(t, sharded)
+
+	objs, err := r.NewHTTPProxiesFromShardedHTTPProxy()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	_, tmp := findChild(t, objs, "app-0-tmp")
+	g.Expect(tmp.Spec.IngressClassName).To(Equal(testOldShardClass))
+
+	_, main := findChild(t, objs, "app")
+	g.Expect(main.Spec.IngressClassName).To(Equal(testOldShardClass))
+}
