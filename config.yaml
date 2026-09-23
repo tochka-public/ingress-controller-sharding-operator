@@ -24,6 +24,11 @@ rateLimit:
     # SHARDED_RATELIMIT_UPDATECOOLDOWN_OBJECT
     object: 30s # full termination period is updateCooldown.object * 3
     shard: 10s # protection ingesses from overload when reloading shards
+  # SHARDED_RATELIMIT_MAXAPPLYBACKLOG
+  # upper bound on how far ahead the shard apply clock may schedule. updateCooldown.shard
+  # is spent per object on the same shard, so a mass shard move queues objectCount * shard;
+  # past this horizon objects are applied without the cooldown instead of waiting it out.
+  maxApplyBacklog: 5m
   # SHARDED_RATELIMIT_APIRATELIMIT
   apiRateLimit: 10
   apiBurstLimit: 100

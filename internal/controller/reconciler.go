@@ -50,6 +50,7 @@ type ShardedReconciler struct {
 	MaxShards                                map[string]int
 	TerminationPeriod                        *time.Duration
 	ShardUpdateCooldown                      *time.Duration
+	MaxApplyBacklog                          *time.Duration
 	AllShardsBaseHosts                       *[]string
 	DomainSubstring                          *string
 	MutatingWebhookAnnotation                *string
@@ -121,6 +122,10 @@ type applyPlan struct {
 const (
 	ExponentialBackoffBaseDelay = 5 * time.Millisecond
 	ExponentialBackoffMaxDelay  = 1000 * time.Second
+
+	// DefaultMaxApplyBacklog bounds how far into the future the shard apply
+	// clock may run when rateLimit.maxApplyBacklog is not configured.
+	DefaultMaxApplyBacklog = 5 * time.Minute
 
 	AutoDeleteAfterAnnotation = "auto-delete-after"
 )
@@ -728,6 +733,13 @@ func (r *ShardedReconciler) CheckClusterShards() error {
 				logger.Info("Reducing shard count to match Cluster value", "IngressClass", className, "ConfiguredShards", configShard, "CurrentShards", count)
 				r.MaxShards[className] = count
 			}
+			// A class configured with 0 shards is applied to under its bare
+			// name, so seed that too: the loop below covers class-0..class-N
+			// only, and for configShard == 0 it runs zero times, leaving the
+			// name the reconciler actually uses without a plan.
+			if configShard == 0 {
+				r.initApplyPlan(className)
+			}
 			for i := 0; i < configShard; i++ {
 				shardName := fmt.Sprintf("%s-%d", className, i)
 				r.initApplyPlan(shardName)
@@ -758,13 +770,49 @@ func (r *ShardedReconciler) initApplyPlan(shardName string) {
 // while a shard name reaching the rate limiter may also come from an ingress
 // class created later, or from the status of an object that has been migrated
 // away from that class. Indexing NextApplyTime directly panics in those cases.
+//
+// A plan created here starts cold. initApplyPlan stamps lastCreating with the
+// current time, which reads as "this shard was just applied to" and costs the
+// very first object a full shardUpdateCooldown before anything is created on a
+// shard nothing has been applied to yet.
+//
+// The plan is also pulled back to the backlog horizon. applyRateLimit hands out
+// apply slots by moving lastCreating/lastDeleting one shardUpdateCooldown into
+// the future per object and never moves them back, so a shard every object of a
+// class shares - which is what a class configured with 0 shards is, since the
+// shard name is then the bare class name - accumulates a queue as long as the
+// object count. Past the horizon that queue stops being rate limiting and
+// becomes an outage: objects are scheduled hours out and updates never land.
+// Capping it trades the per-shard cooldown under mass churn for a bounded
+// worst case.
 func (r *ShardedReconciler) applyPlanFor(shardName string) *applyPlan {
 	ap, exists := r.NextApplyTime[shardName]
 	if !exists {
-		r.initApplyPlan(shardName)
-		ap = r.NextApplyTime[shardName]
+		if r.NextApplyTime == nil {
+			r.NextApplyTime = make(map[string]*applyPlan)
+		}
+		ap = &applyPlan{}
+		r.NextApplyTime[shardName] = ap
+	}
+
+	horizon := time.Now().Add(r.maxApplyBacklog())
+	if ap.lastCreating.After(horizon) {
+		ap.SetLastCreating(horizon)
+	}
+	if ap.lastDeleting.After(horizon) {
+		ap.SetLastDeleting(horizon)
 	}
 	return ap
+}
+
+// maxApplyBacklog is how far ahead of now applyRateLimit may schedule an apply
+// on a shard. Nil keeps the operator working on a config that predates the
+// setting.
+func (r *ShardedReconciler) maxApplyBacklog() time.Duration {
+	if r.MaxApplyBacklog == nil || *r.MaxApplyBacklog <= 0 {
+		return DefaultMaxApplyBacklog
+	}
+	return *r.MaxApplyBacklog
 }
 
 func (r *ShardedReconciler) CheckReshardingConflict(newShard string, objName string) string {

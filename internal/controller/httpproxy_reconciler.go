@@ -37,6 +37,7 @@ func (r *ShardedHTTPProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		MaxShards:                                r.MaxShards,
 		TerminationPeriod:                        r.TerminationPeriod,
 		ShardUpdateCooldown:                      r.ShardUpdateCooldown,
+		MaxApplyBacklog:                          r.MaxApplyBacklog,
 		AllShardsBaseHosts:                       r.AllShardsBaseHosts,
 		DomainSubstring:                          r.DomainSubstring,
 		MutatingWebhookAnnotation:                r.MutatingWebhookAnnotation,

@@ -28,8 +28,9 @@ type ConfigType struct {
 			Object time.Duration `mapstructure:"object"`
 			Shard  time.Duration `mapstructure:"shard"`
 		} `mapstructure:"updateCooldown"`
-		ApiRateLimit  int `mapstructure:"apiRateLimit"`
-		ApiBurstLimit int `mapstructure:"apiBurstLimit"`
+		ApiRateLimit    int           `mapstructure:"apiRateLimit"`
+		ApiBurstLimit   int           `mapstructure:"apiBurstLimit"`
+		MaxApplyBacklog time.Duration `mapstructure:"maxApplyBacklog"`
 	} `mapstructure:"rateLimit"`
 	Finalizer struct {
 		Key                       string        `mapstructure:"key"`
@@ -67,6 +68,7 @@ func LoadConfig(path string, runShardedIngress, runShardedHTTPProxy bool) (*Conf
 	viper.SetDefault("rateLimit.updateCooldown.shard", 10*time.Second)
 	viper.SetDefault("rateLimit.apiRateLimit", 10)
 	viper.SetDefault("rateLimit.apiBurstLimit", 100)
+	viper.SetDefault("rateLimit.maxApplyBacklog", 5*time.Minute)
 
 	viper.SetDefault("shardedHTTPProxy.labels.rootHTTPProxy", "k8s.tochka.com/base-proxy")
 	viper.SetDefault("shardedHTTPProxy.annotations.virtualHosts", "k8s.tochka.com/virtual-hosts")
